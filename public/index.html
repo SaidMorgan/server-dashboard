@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Server Control</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🎛️</text></svg>" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot" id="globalDot"></span>
+      <h1>Server Control</h1>
+    </div>
+    <div class="meta">
+      <span id="hostLabel"></span>
+      <span id="clock"></span>
+      <span id="live" class="live" title="Live connection status">live</span>
+      <button id="signout" class="icon hidden" title="Sign out">Sign out</button>
+    </div>
+  </header>
+
+  <main id="cards" class="cards"></main>
+
+  <section class="feed" id="feedSection">
+    <h2>Activity</h2>
+    <ul id="alerts" class="alerts"></ul>
+  </section>
+
+  <template id="cardTemplate">
+    <article class="card">
+      <div class="card-head">
+        <div class="title">
+          <span class="dot"></span>
+          <h2 class="name"></h2>
+        </div>
+        <div class="head-right">
+          <span class="badge players"></span>
+          <button class="icon popout" title="Open in its own window">⧉</button>
+        </div>
+      </div>
+
+      <div class="stats"></div>
+
+      <div class="countdown hidden"></div>
+
+      <div class="section players-list">
+        <h3>Players</h3>
+        <ul class="playerlist"></ul>
+      </div>
+
+      <div class="section controls">
+        <h3>Controls</h3>
+        <div class="btnrow">
+          <button data-act="start" class="btn good">Start</button>
+          <button data-act="restart" class="btn warn">Restart now</button>
+          <button data-act="stop" class="btn bad">Stop</button>
+          <button data-act="save" class="btn game-only">Save world</button>
+        </div>
+        <div class="btnrow game-only">
+          <input class="countdown-min" type="number" min="1" max="120" value="15" title="minutes" />
+          <button data-act="scheduleRestart" class="btn">Warn &amp; restart</button>
+          <button data-act="cancelRestart" class="btn ghost">Cancel</button>
+        </div>
+        <div class="btnrow game-only">
+          <input class="broadcast-msg" type="text" placeholder="Broadcast message to players" />
+          <button data-act="broadcast" class="btn">Send</button>
+        </div>
+      </div>
+
+      <div class="section console game-only">
+        <h3>RCON console</h3>
+        <pre class="output"></pre>
+        <div class="btnrow">
+          <input class="rcon-input" type="text" placeholder="e.g. listplayers" spellcheck="false" />
+          <button class="btn rcon-send">Run</button>
+        </div>
+      </div>
+
+      <div class="section chart-wrap">
+        <h3>Last 3 hours</h3>
+        <svg class="chart" viewBox="0 0 300 60" preserveAspectRatio="none"></svg>
+        <div class="chart-legend"></div>
+      </div>
+
+      <details class="section schedules">
+        <summary>Schedules</summary>
+        <ul class="schedulelist"></ul>
+        <div class="btnrow sched-form">
+          <input class="sched-cron" type="text" placeholder="0 5 * * *" spellcheck="false"
+                 title="minute hour day month weekday" />
+          <select class="sched-action">
+            <option value="restart">Restart</option>
+            <option value="backup">Back up</option>
+            <option value="save">Save</option>
+            <option value="broadcast">Broadcast</option>
+            <option value="start">Start</option>
+            <option value="stop">Stop</option>
+          </select>
+          <input class="sched-warn" type="number" min="0" max="60" value="15" title="warn players this many minutes first" />
+          <button class="btn sched-add">Add</button>
+        </div>
+        <input class="sched-message hidden" type="text" placeholder="Broadcast message" />
+        <div class="sched-hint">Times use this machine's clock. Jobs from config.json are read-only here.</div>
+      </details>
+
+      <details class="section backups">
+        <summary>Backups</summary>
+        <div class="btnrow">
+          <button class="btn backup-now">Back up now</button>
+          <span class="backup-status"></span>
+        </div>
+        <ul class="backuplist"></ul>
+      </details>
+
+      <details class="section logs">
+        <summary>Log tail</summary>
+        <pre class="logout">loading…</pre>
+      </details>
+    </article>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>

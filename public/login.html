@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign in — Server Dashboard</title>
+  <link rel="stylesheet" href="/style.css" />
+  <style>
+    body { display: grid; place-items: center; min-height: 100vh; }
+    .login {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+      padding: 28px; width: min(360px, calc(100vw - 32px));
+    }
+    .login h1 { font-size: 16px; margin: 0 0 4px; }
+    .login p.sub { color: var(--dim); font-size: 13px; margin: 0 0 20px; }
+    .login label {
+      display: block; font-size: 11px; color: var(--dim);
+      text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px;
+    }
+    .login input[type=password] {
+      width: 100%; background: #0d1117; border: 1px solid var(--line);
+      border-radius: 6px; color: var(--text); padding: 9px 12px;
+      font-family: var(--mono); font-size: 13px;
+    }
+    .login input:focus { outline: none; border-color: var(--accent); }
+    .login button {
+      width: 100%; margin-top: 14px; padding: 9px;
+      background: var(--panel-2); color: var(--text);
+      border: 1px solid var(--line); border-radius: 6px;
+      cursor: pointer; font-size: 13px;
+    }
+    .login button:hover:not(:disabled) { border-color: var(--accent); }
+    .login button:disabled { opacity: .5; cursor: not-allowed; }
+    .error {
+      color: var(--bad); font-size: 12px; font-family: var(--mono);
+      margin-top: 12px; min-height: 16px;
+    }
+  </style>
+</head>
+<body>
+  <form class="login" id="form">
+    <h1>Server Dashboard</h1>
+    <p class="sub">This dashboard is reachable over the network, so it needs a password.</p>
+
+    <label for="password">Password</label>
+    <input type="password" id="password" autocomplete="current-password" autofocus required />
+
+    <button type="submit" id="submit">Sign in</button>
+    <div class="error" id="error" role="alert"></div>
+  </form>
+
+  <script>
+    const form = document.getElementById('form');
+    const input = document.getElementById('password');
+    const button = document.getElementById('submit');
+    const errorEl = document.getElementById('error');
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      errorEl.textContent = '';
+      button.disabled = true;
+      button.textContent = 'Signing in…';
+
+      try {
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: input.value }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          location.href = '/';
+          return;
+        }
+        errorEl.textContent = data.error || 'Sign in failed';
+      } catch {
+        errorEl.textContent = 'Could not reach the dashboard';
+      }
+
+      input.value = '';
+      input.focus();
+      button.disabled = false;
+      button.textContent = 'Sign in';
+    });
+  </script>
+</body>
+</html>

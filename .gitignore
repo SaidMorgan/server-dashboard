@@ -1,0 +1,39 @@
+# ---------------------------------------------------------------------------
+# Anything in here would leak a real deployment. Do not remove entries lightly.
+# ---------------------------------------------------------------------------
+
+# Your live config: contains RCON passwords, admin passwords and absolute paths.
+# Share config.example.json instead.
+config.json
+
+# Backups and scratch copies of it hold the same secrets.
+config.json.*
+config.*.json
+!config.example.json
+*.bak
+*.bak-*
+
+# Secrets pulled in by ${VAR} interpolation.
+.env
+.env.*
+!.env.example
+
+# Runtime state. history.json and alerts.json contain REAL PLAYER NAMES from
+# your server — treat them as other people's personal data, not as your logs.
+data/
+backups/
+
+# Session signing key.
+*.secret
+
+node_modules/
+npm-debug.log*
+*.log
+
+# Editors / OS / local tooling
+.vscode/
+.idea/
+.claude/settings.local.json
+Thumbs.db
+desktop.ini
+.DS_Store

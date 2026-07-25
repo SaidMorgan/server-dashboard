@@ -1,0 +1,118 @@
+{
+  "port": 8770,
+  "bind": "127.0.0.1",
+  "pollSeconds": 10,
+  "historyHours": 48,
+
+  "auth": {
+    "password": "${DASHBOARD_PASSWORD}",
+    "sessionDays": 30
+  },
+
+  "notifications": {
+    "windowsToast": true,
+    "discord": {
+      "enabled": false,
+      "url": "${DISCORD_WEBHOOK_URL}",
+      "events": ["error", "warn"]
+    },
+    "webhook": {
+      "enabled": false,
+      "url": "",
+      "events": ["error"]
+    }
+  },
+
+  "targets": [
+    {
+      "id": "ark-island",
+      "name": "ARK: The Island",
+      "kind": "game",
+      "game": "ark",
+      "host": "127.0.0.1",
+      "gamePort": 7777,
+      "queryPort": 27015,
+      "rconPort": 27020,
+      "rconPassword": "${ARK_RCON_PASSWORD}",
+      "maxPlayers": 10,
+      "processName": "ArkAscendedServer",
+      "startCommand": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\ARK Survival Ascended Dedicated Server\\ShooterGame\\Saved\\Start Island.bat",
+      "logFile": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\ARK Survival Ascended Dedicated Server\\ShooterGame\\Saved\\Logs\\ShooterGame.log",
+
+      "watchdog": {
+        "enabled": true,
+        "restartAfterSeconds": 60,
+        "maxRestartsPerHour": 3
+      },
+
+      "backup": {
+        "enabled": true,
+        "paths": [
+          "C:\\Program Files (x86)\\Steam\\steamapps\\common\\ARK Survival Ascended Dedicated Server\\ShooterGame\\Saved\\SavedArks"
+        ],
+        "keep": 10,
+        "beforeRestart": true
+      },
+
+      "schedules": [
+        {
+          "cron": "0 5 * * *",
+          "action": "restart",
+          "warnMinutes": 15,
+          "reason": "nightly restart"
+        },
+        {
+          "cron": "0 */6 * * *",
+          "action": "backup"
+        }
+      ]
+    },
+
+    {
+      "id": "palworld",
+      "name": "Palworld",
+      "kind": "game",
+      "game": "palworld",
+      "host": "127.0.0.1",
+      "gamePort": 8211,
+      "restPort": 8212,
+      "adminPassword": "${PALWORLD_ADMIN_PASSWORD}",
+      "maxPlayers": 32,
+      "shutdownCountdownSeconds": 60,
+      "processName": "PalServer-Win64-Shipping-Cmd",
+      "startCommand": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\PalServer\\Start.bat",
+
+      "backup": {
+        "enabled": true,
+        "paths": ["C:\\Program Files (x86)\\Steam\\steamapps\\common\\PalServer\\Pal\\Saved\\SaveGames"],
+        "keep": 20,
+        "beforeRestart": true
+      }
+    },
+
+    {
+      "id": "minecraft",
+      "name": "Minecraft",
+      "kind": "game",
+      "game": "minecraft",
+      "host": "127.0.0.1",
+      "gamePort": 25565,
+      "rconPort": 25575,
+      "rconPassword": "${MINECRAFT_RCON_PASSWORD}",
+      "maxPlayers": 20,
+      "processName": "java",
+      "startCommand": "C:\\Servers\\Minecraft\\start.bat",
+      "logFile": "C:\\Servers\\Minecraft\\logs\\latest.log"
+    },
+
+    {
+      "id": "example-service",
+      "name": "Example Windows Service",
+      "kind": "service",
+      "serviceName": "MyApiService",
+      "healthUrl": "http://127.0.0.1:3001/health",
+      "nssm": "C:\\Apps\\nssm\\nssm.exe",
+      "logDir": "C:\\Apps\\MyApi\\logs"
+    }
+  ]
+}
