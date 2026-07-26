@@ -160,6 +160,13 @@ details.logs summary {
 .alerts .when { color: var(--dim); flex: none; }
 .alerts .who { color: var(--accent); flex: none; }
 
+/* Alert text is arbitrary: a failure carries whatever Windows said, and a path
+   like C:\...\Steam\steamapps\common\PalServer has no space to break at. A flex
+   item won't shrink below its content unless min-width is cleared, so without
+   both of these a long path pushes straight out through the side of the row —
+   which on a phone means text over the page background. */
+.alerts .msg { min-width: 0; overflow-wrap: anywhere; }
+
 /* Live connection indicator: dim when polling, lit when the SSE stream is up. */
 .live {
   font-size: 10px; text-transform: uppercase; letter-spacing: .08em;

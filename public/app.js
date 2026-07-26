@@ -472,7 +472,7 @@ async function loadLog(id, node) {
 function renderAlerts() {
   if (!alerts.length) { alertsEl.innerHTML = '<li class="empty">nothing yet</li>'; return; }
   alertsEl.innerHTML = alerts
-    .map((a) => `<li class="${a.level}"><span class="when">${fmtTime(a.t)}</span><span class="who">${escapeHtml(a.targetId)}</span><span>${escapeHtml(a.message)}</span></li>`)
+    .map((a) => `<li class="${a.level}"><span class="when">${fmtTime(a.t)}</span><span class="who">${escapeHtml(a.targetId)}</span><span class="msg">${escapeHtml(a.message)}</span></li>`)
     .join('');
 }
 
