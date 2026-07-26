@@ -7,6 +7,22 @@ import { rconCommand, getClient } from './rcon.js';
 import { getProfile } from './games/index.js';
 import { getProcessStats, getServiceState, checkHealth, toast } from './win.js';
 
+// --- tunables ---------------------------------------------------------------
+// Poll interval and history retention are per-install, so they live in
+// config.json (pollSeconds, historyHours) rather than here. These are the ones
+// with no reason to differ between installs.
+
+// Fallback for alerts.keep, which lives in config.json.
+const DEFAULT_ALERT_LIMIT = 200;
+
+// Default span the dashboard's history graph asks for, in minutes.
+const HISTORY_DEFAULT_MINUTES = 180;
+
+// Fallback for a target's watchdog.restartAfterSeconds, and the window that
+// watchdog.maxRestartsPerHour is counted over. Both are per-target config.
+const WATCHDOG_WAIT_SECONDS = 60;
+const RESTART_WINDOW_MS = 3600_000;
+
 export class Monitor {
   constructor(config, dataDir) {
     this.config = config;
@@ -17,6 +33,7 @@ export class Monitor {
     this.suppressed = new Set(); // ids under a managed restart — don't cry wolf
     this.cpuSamples = new Map(); // processName -> {cpuSeconds, at} for % between polls
     this.cores = os.cpus().length || 1;
+    this.alertLimit = config.alerts?.keep ?? DEFAULT_ALERT_LIMIT;
 
     // Set after construction by server.js — Actions needs a Monitor, so they
     // cannot both be constructor arguments of each other.
@@ -50,7 +67,7 @@ export class Monitor {
       trimmed[id] = keep;
     }
     fs.writeFile(this.historyFile, JSON.stringify(trimmed), () => {});
-    fs.writeFile(this.alertsFile, JSON.stringify(this.alerts.slice(0, 200)), () => {});
+    fs.writeFile(this.alertsFile, JSON.stringify(this.alerts.slice(0, this.alertLimit)), () => {});
   }
 
   attach({ actions, notifier }) {
@@ -60,10 +77,15 @@ export class Monitor {
 
   // The single funnel every event in the dashboard passes through, which is why
   // notifications and the live stream hook in here and nowhere else.
-  addAlert(level, targetId, message) {
+  //
+  // `category` is optional and coarse ('backup', and nothing else so far). It
+  // exists so a notification channel can mute a class of event that is worth
+  // recording but not worth a phone buzz — see notifications.*.mute.
+  addAlert(level, targetId, message, category = null) {
     const alert = { t: Date.now(), level, targetId, message };
+    if (category) alert.category = category;
     this.alerts.unshift(alert);
-    this.alerts = this.alerts.slice(0, 200);
+    this.alerts = this.alerts.slice(0, this.alertLimit);
 
     const name = this.config.targets.find((x) => x.id === targetId)?.name || targetId;
     if (level === 'error' && this.config.notifications?.windowsToast !== false) {
@@ -271,7 +293,7 @@ export class Monitor {
     if (!cfg?.enabled || !target.startCommand || !this.actions) return;
     if (this.watchdogTimers.has(id)) return;
 
-    const wait = (cfg.restartAfterSeconds ?? 60) * 1000;
+    const wait = (cfg.restartAfterSeconds ?? WATCHDOG_WAIT_SECONDS) * 1000;
     this.addAlert('warn', id, `Watchdog armed — will restart in ${Math.round(wait / 1000)}s if it stays down`);
 
     const timer = setTimeout(() => {
@@ -280,7 +302,7 @@ export class Monitor {
 
       // Flap protection: a server that crashes on startup would otherwise be
       // restarted forever, which is worse than leaving it down and saying so.
-      const hourAgo = Date.now() - 3600_000;
+      const hourAgo = Date.now() - RESTART_WINDOW_MS;
       const recent = (this.restartLog.get(id) || []).filter((t) => t > hourAgo);
       const limit = cfg.maxRestartsPerHour ?? 3;
       if (recent.length >= limit) {
@@ -328,7 +350,7 @@ export class Monitor {
     );
   }
 
-  historyFor(id, minutes = 180) {
+  historyFor(id, minutes = HISTORY_DEFAULT_MINUTES) {
     const cutoff = Date.now() - minutes * 60 * 1000;
     return (this.history.get(id) || []).filter((r) => r.t >= cutoff);
   }

@@ -70,7 +70,20 @@ that quietly can't authenticate.
 | `auth.password` | *(none)* | Required to bind anywhere but localhost |
 | `auth.sessionDays` | `30` | How long a login lasts |
 | `notifications` | off | Discord and webhook alerts — see below |
+| `notifications.dedupeSeconds` | `60` | An identical message is sent at most once per this window |
+| `notifications.maxPerMinute` | `10` | Hard ceiling on outbound messages, so a flapping server can't flood a channel |
+| `backups.flushSeconds` | `4` | Time a save is given to reach disk before the copy starts |
+| `backups.stageTimeoutMinutes` | `10` | Ceiling on the staging copy |
+| `backups.zipTimeoutMinutes` | `20` | Ceiling on compressing, and on extracting during a restore |
+| `alerts.keep` | `200` | Alerts kept in the activity feed and `data/alerts.json` |
+| `restart.graceSeconds` | `90` | Extra time after a shutdown countdown before the process is force-killed |
 | `targets` | — | The servers to manage |
+
+**config.json takes comments.** `//` and `/* */` are stripped before parsing, so
+every option can be annotated in place — see `config.example.json`, which is
+commented throughout. Anything tunable lives in the config; the constants left
+in `src/` are protocol details (RCON frame bounds, alert-dedupe map size) that
+have no reason to differ between installs.
 
 ### A game target
 
@@ -166,7 +179,8 @@ startup. Waking up to a queue of missed 3am restarts is worse than missing them.
   "discord": {
     "enabled": true,
     "url": "${DISCORD_WEBHOOK_URL}",
-    "events": ["error", "warn"]
+    "events": ["error", "warn"],
+    "mute": ["backup"]        // optional: categories this channel skips
   }
 }
 ```
@@ -174,6 +188,14 @@ startup. Waking up to a queue of missed 3am restarts is worse than missing them.
 `webhook` takes the same shape and POSTs plain JSON to any URL. Identical
 messages are suppressed for a minute and there's a hard ceiling of 10 per
 minute, so a flapping server can't flood your channel.
+
+`events` picks the levels a channel wants; `mute` drops whole categories from
+it regardless of level. `backup` is the only category so far, and muting it is
+the default: backup successes and failures are routine bookkeeping, better read
+in the dashboard's activity feed than pushed to everyone's phone. The feed and
+the alerts API always keep every alert — `mute` only decides what leaves the
+machine. Restores stay un-muted; they overwrite a live world and are worth an
+interruption.
 
 ### A Windows service target
 

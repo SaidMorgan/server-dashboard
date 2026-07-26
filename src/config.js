@@ -93,6 +93,54 @@ function interpolate(node, where, errors) {
 }
 
 // ---------------------------------------------------------------------------
+// Comments in config.json
+// ---------------------------------------------------------------------------
+
+// A config nobody can annotate is a config nobody dares change, so // and /* */
+// are allowed and stripped before parsing. The one thing this must not break is
+// a URL: "https://discord.com/..." has a // inside a string, so track whether
+// we're inside one. Replacing comments with spaces rather than deleting them
+// keeps every offset intact, so JSON.parse still reports the real position.
+export function stripJsonComments(text) {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    const next = text[i + 1];
+
+    if (inString) {
+      out += c;
+      if (escaped) escaped = false;
+      else if (c === '\\') escaped = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+
+    if (c === '"') { inString = true; out += c; continue; }
+
+    if (c === '/' && next === '/') {
+      while (i < text.length && text[i] !== '\n') { out += ' '; i += 1; }
+      out += '\n';
+      continue;
+    }
+
+    if (c === '/' && next === '*') {
+      const end = text.indexOf('*/', i + 2);
+      const stop = end === -1 ? text.length : end + 2;
+      // Keep newlines so reported line numbers still line up with the file.
+      for (; i < stop; i += 1) out += text[i] === '\n' ? '\n' : ' ';
+      i -= 1;
+      continue;
+    }
+
+    out += c;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Defaults
 // ---------------------------------------------------------------------------
 
@@ -114,8 +162,33 @@ const DEFAULTS = {
   },
   notifications: {
     windowsToast: true,
-    discord: { enabled: false, url: '', events: ['error', 'warn'] },
-    webhook: { enabled: false, url: '', events: ['error'] },
+    // An identical message is sent at most once per this many seconds, and no
+    // more than maxPerMinute leave the machine in any one minute. Both guard
+    // against a flapping server flooding a channel and burning the webhook.
+    dedupeSeconds: 60,
+    maxPerMinute: 10,
+    discord: { enabled: false, url: '', events: ['error', 'warn'], mute: [] },
+    webhook: { enabled: false, url: '', events: ['error'], mute: [] },
+  },
+  // Defaults for every target's backups; a target's own backup block wins.
+  backups: {
+    // Seconds given to a save command to reach disk before the copy starts.
+    flushSeconds: 4,
+    // Ceilings, not expected durations — a big world is slow, and a backup that
+    // takes 15 minutes beats one killed at 5.
+    stageTimeoutMinutes: 10,
+    zipTimeoutMinutes: 20,
+  },
+  alerts: {
+    // Alerts kept in memory and in data/alerts.json. The activity feed is a
+    // recent-activity view, not an audit log.
+    keep: 200,
+  },
+  restart: {
+    // Extra seconds allowed after a shutdown countdown ends before the process
+    // is force-killed. The countdown ends when the server *starts* exiting;
+    // flushing a large world to disk happens after that.
+    graceSeconds: 90,
   },
   targets: [],
 };
@@ -145,6 +218,10 @@ function deepDefaults(value, defaults) {
 
 const SCHEDULE_ACTIONS = ['restart', 'start', 'stop', 'save', 'backup', 'broadcast'];
 const ALERT_LEVELS = ['info', 'warn', 'error'];
+
+// Categories a notification channel can mute. The dashboard's own activity feed
+// always shows everything; this only decides what leaves the machine.
+const ALERT_CATEGORIES = ['backup'];
 
 function check(errors, cond, message) {
   if (!cond) errors.push(message);
@@ -195,6 +272,18 @@ function validateNotificationChannel(channel, where, errors) {
   for (const e of channel.events) {
     if (!ALERT_LEVELS.includes(e)) {
       errors.push(`${where}.events: "${e}" is not a level (expected ${ALERT_LEVELS.join(', ')})`);
+    }
+  }
+
+  if (channel.mute !== undefined) {
+    if (!Array.isArray(channel.mute)) {
+      errors.push(`${where}.mute: expected an array of ${ALERT_CATEGORIES.join('/')}`);
+    } else {
+      for (const c of channel.mute) {
+        if (!ALERT_CATEGORIES.includes(c)) {
+          errors.push(`${where}.mute: "${c}" is not a category (expected ${ALERT_CATEGORIES.join(', ')})`);
+        }
+      }
     }
   }
 }
@@ -315,6 +404,20 @@ function validate(config, errors) {
   validateNotificationChannel(config.notifications?.discord, 'notifications.discord', errors);
   validateNotificationChannel(config.notifications?.webhook, 'notifications.webhook', errors);
 
+  // Tunables. Each must be a positive number — a zero or a negative here turns
+  // into a timeout that fires instantly or a retention that keeps nothing.
+  for (const [where, value] of [
+    ['notifications.dedupeSeconds', config.notifications?.dedupeSeconds],
+    ['notifications.maxPerMinute', config.notifications?.maxPerMinute],
+    ['backups.flushSeconds', config.backups?.flushSeconds],
+    ['backups.stageTimeoutMinutes', config.backups?.stageTimeoutMinutes],
+    ['backups.zipTimeoutMinutes', config.backups?.zipTimeoutMinutes],
+    ['alerts.keep', config.alerts?.keep],
+    ['restart.graceSeconds', config.restart?.graceSeconds],
+  ]) {
+    check(errors, isNum(value) && value > 0, `${where}: expected a positive number, got ${JSON.stringify(value)}`);
+  }
+
   if (!Array.isArray(config.targets)) {
     errors.push('targets: expected an array of servers to monitor');
     return;
@@ -366,7 +469,7 @@ export function loadConfig({ dir, file } = {}) {
 
   let raw;
   try {
-    raw = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    raw = JSON.parse(stripJsonComments(fs.readFileSync(configFile, 'utf8')));
   } catch (err) {
     throw new ConfigError([`not valid JSON — ${err.message}`, 'A trailing comma or a missing quote is the usual cause.']);
   }

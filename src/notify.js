@@ -10,23 +10,41 @@
 // cooling-off period, and there is a hard ceiling on messages per minute.
 
 const COLORS = { error: 0xf85149, warn: 0xd29922, info: 0x58a6ff };
-const DEDUPE_MS = 60_000;
-const MAX_PER_MINUTE = 10;
-const TIMEOUT_MS = 6000;
+
+// The two rate limits are config (notifications.dedupeSeconds / maxPerMinute);
+// these are only the fallbacks for a Notifier built without them.
+const DEFAULT_DEDUPE_SECONDS = 60;
+const DEFAULT_MAX_PER_MINUTE = 10;
+
+const RATE_WINDOW_MS = 60_000;   // the "per minute" in maxPerMinute
+const TIMEOUT_MS = 6000;         // giving up on a webhook POST
+
+// Dedupe entries held before old ones are swept, so a long-running service
+// can't grow the map without bound. Internal; not worth a config knob.
+const DEDUPE_MAX_KEYS = 500;
 
 export class Notifier {
   constructor(config) {
     this.config = config.notifications || {};
+    this.dedupeMs = (this.config.dedupeSeconds ?? DEFAULT_DEDUPE_SECONDS) * 1000;
+    this.maxPerWindow = this.config.maxPerMinute ?? DEFAULT_MAX_PER_MINUTE;
     this.recent = new Map(); // dedupe key -> last sent timestamp
     this.window = [];        // timestamps of sends inside the last minute
     this.suppressedSinceReport = 0;
   }
 
-  #channels(level) {
+  // A channel takes an alert when the level is one it asked for and the
+  // category is not one it muted. Muting is per-channel on purpose: backup
+  // chatter belongs in the dashboard's activity feed, which keeps every alert
+  // regardless, not in a chat channel people actually read.
+  #channels(level, category) {
     const out = [];
     for (const name of ['discord', 'webhook']) {
       const c = this.config[name];
-      if (c?.enabled && c.url && (c.events || []).includes(level)) out.push([name, c]);
+      if (!c?.enabled || !c.url) continue;
+      if (!(c.events || []).includes(level)) continue;
+      if (category && (c.mute || []).includes(category)) continue;
+      out.push([name, c]);
     }
     return out;
   }
@@ -35,10 +53,10 @@ export class Notifier {
     const now = Date.now();
 
     const last = this.recent.get(key);
-    if (last && now - last < DEDUPE_MS) return false;
+    if (last && now - last < this.dedupeMs) return false;
 
-    this.window = this.window.filter((t) => now - t < 60_000);
-    if (this.window.length >= MAX_PER_MINUTE) {
+    this.window = this.window.filter((t) => now - t < RATE_WINDOW_MS);
+    if (this.window.length >= this.maxPerWindow) {
       this.suppressedSinceReport += 1;
       return false;
     }
@@ -46,9 +64,8 @@ export class Notifier {
     this.recent.set(key, now);
     this.window.push(now);
 
-    // Keep the dedupe map from growing without bound on a long-running service.
-    if (this.recent.size > 500) {
-      for (const [k, t] of this.recent) if (now - t > DEDUPE_MS) this.recent.delete(k);
+    if (this.recent.size > DEDUPE_MAX_KEYS) {
+      for (const [k, t] of this.recent) if (now - t > this.dedupeMs) this.recent.delete(k);
     }
     return true;
   }
@@ -56,7 +73,7 @@ export class Notifier {
   // Fire and forget: a webhook being down must never stall the poll loop or
   // throw into it.
   notify(alert, targetName) {
-    const channels = this.#channels(alert.level);
+    const channels = this.#channels(alert.level, alert.category);
     if (!channels.length) return;
     if (!this.#allowed(`${alert.level}:${alert.targetId}:${alert.message}`)) return;
 

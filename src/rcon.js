@@ -33,6 +33,15 @@ function encode(id, type, body) {
 // game, since a server that is down is a server that is down.
 const BACKOFF_STEPS = [15_000, 30_000, 60_000, 120_000, 300_000];
 
+// A reply can span several packets with no end marker, so we settle once
+// nothing new has arrived for this long. Too low truncates long player lists.
+const MULTIPACKET_SETTLE_MS = 150;
+
+// Sanity bounds on a frame length read straight off the wire — outside these,
+// the stream is desynced rather than carrying a huge reply.
+const MIN_FRAME_BYTES = 10;
+const MAX_FRAME_BYTES = 8 * 1024 * 1024;
+
 class RconClient {
   constructor({ host, port, password, timeout = 8000 }) {
     this.host = host;
@@ -86,7 +95,7 @@ class RconClient {
     this.buffer = Buffer.concat([this.buffer, data]);
     while (this.buffer.length >= 4) {
       const size = this.buffer.readInt32LE(0);
-      if (size < 10 || size > 8 * 1024 * 1024) { this.#teardown('protocol desync'); return; }
+      if (size < MIN_FRAME_BYTES || size > MAX_FRAME_BYTES) { this.#teardown('protocol desync'); return; }
       if (this.buffer.length < size + 4) break;
 
       const frame = this.buffer.subarray(4, size + 4);
@@ -107,7 +116,7 @@ class RconClient {
         clearTimeout(p.killTimer);
         this.pending.delete(id);
         p.resolve({ ok: true, body: p.chunks.join('') });
-      }, 150);
+      }, MULTIPACKET_SETTLE_MS);
       p.settleTimer.unref?.();
     }
   }

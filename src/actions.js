@@ -4,7 +4,27 @@ import { rconCommand } from './rcon.js';
 import { getProfile } from './games/index.js';
 import { launchDetached, killProcess, controlService } from './win.js';
 
+// --- tunables ---------------------------------------------------------------
+// Sensible defaults for the servers this was built against. Change them here;
+// nothing below hard-codes a duration.
+
+// How long before a restart players get told, in minutes.
 const WARN_MINUTES = [15, 10, 5, 1];
+
+// While a server is deliberately down, alerts for it are suppressed so a
+// restart doesn't fire "server is gone" at everyone. These are how long that
+// blackout lasts — long enough to cover the operation, short enough that a
+// genuine failure still surfaces. START is the longest: a cold map load is slow.
+const SUPPRESS_START_MS = 90_000;
+const SUPPRESS_SERVICE_MS = 60_000;
+const SUPPRESS_SETTLE_MS = 10_000;   // after the server is confirmed down
+
+// Fallback for restart.graceSeconds in config.json.
+const DEFAULT_SHUTDOWN_GRACE_SECONDS = 90;
+
+const SAVE_FLUSH_MS = 3000;          // let a save reach disk before asking to exit
+const RESTART_GAP_MS = 5000;         // pause between the process dying and relaunch
+const STOP_POLL_MS = 3000;           // how often to check whether it exited yet
 
 export class Actions {
   constructor(config, monitor) {
@@ -12,6 +32,7 @@ export class Actions {
     this.monitor = monitor;
     this.pending = new Map(); // id -> {timers, finishAt, reason}
     this.backups = null;      // set by server.js; Backups needs Actions too
+    this.shutdownGraceSeconds = config.restart?.graceSeconds ?? DEFAULT_SHUTDOWN_GRACE_SECONDS;
   }
 
   target(id) {
@@ -89,7 +110,7 @@ export class Actions {
     const snap = this.monitor.state.get(id);
     if (snap?.up) return { ok: false, error: 'already running' };
     this.monitor.suppress(id, true);
-    setTimeout(() => this.monitor.suppress(id, false), 90_000).unref?.();
+    setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_START_MS).unref?.();
     const res = launchDetached(t.startCommand);
     if (res.ok) this.monitor.addAlert('info', id, 'Start requested from dashboard');
     return res;
@@ -100,7 +121,7 @@ export class Actions {
     const t = this.target(id);
     if (t.kind === 'service') {
       this.monitor.suppress(id, true);
-      setTimeout(() => this.monitor.suppress(id, false), 60_000).unref?.();
+      setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_SERVICE_MS).unref?.();
       return controlService(t.serviceName, 'stop', t.nssm);
     }
 
@@ -112,7 +133,7 @@ export class Actions {
     if (profile.transport === 'none') {
       await killProcess(t.processName);
       this.monitor.addAlert('info', id, 'Stopped (no remote interface — process terminated)');
-      setTimeout(() => this.monitor.suppress(id, false), 10_000).unref?.();
+      setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_SETTLE_MS).unref?.();
       return { ok: true, saved: false, forced: true };
     }
 
@@ -128,7 +149,7 @@ export class Actions {
       await this.broadcast(id, msg).catch(() => {});
     }
     const saved = await this.save(id).catch(() => ({ ok: false }));
-    await delay(3000);
+    await delay(SAVE_FLUSH_MS);
 
     if (profile.transport === 'rest') {
       await profile.rest.shutdown(t, countdown, 'Server restarting').catch(() => {});
@@ -138,20 +159,20 @@ export class Actions {
 
     // Wait out the countdown itself, plus grace for the world to flush to disk,
     // before force-killing. Force-killing mid-countdown would defeat the point.
-    const deadline = Date.now() + (countdown + 90) * 1000;
+    const deadline = Date.now() + (countdown + this.shutdownGraceSeconds) * 1000;
     while (Date.now() < deadline) {
-      await delay(3000);
+      await delay(STOP_POLL_MS);
       const snap = await this.monitor.pollOnce().then((s) => s.find((x) => x.id === id));
       if (!snap?.up) {
         this.monitor.addAlert('info', id, 'Stopped cleanly');
-        setTimeout(() => this.monitor.suppress(id, false), 10_000).unref?.();
+        setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_SETTLE_MS).unref?.();
         return { ok: true, saved: saved.ok, forced: false };
       }
     }
 
     await killProcess(t.processName);
     this.monitor.addAlert('warn', id, 'Did not exit on request — process was force-killed');
-    setTimeout(() => this.monitor.suppress(id, false), 10_000).unref?.();
+    setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_SETTLE_MS).unref?.();
     return { ok: true, saved: saved.ok, forced: true };
   }
 
@@ -159,7 +180,7 @@ export class Actions {
     const t = this.target(id);
     if (t.kind === 'service') {
       this.monitor.suppress(id, true);
-      setTimeout(() => this.monitor.suppress(id, false), 60_000).unref?.();
+      setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_SERVICE_MS).unref?.();
       const res = await controlService(t.serviceName, 'restart', t.nssm);
       this.monitor.addAlert(res.ok ? 'info' : 'error', id,
         res.ok ? 'Service restarted' : `Restart failed: ${res.error}`);
@@ -176,11 +197,11 @@ export class Actions {
     if (t.backup?.enabled && t.backup?.beforeRestart && this.backups) {
       backup = await this.backups.run(id, { reason: 'before restart', save: false });
       if (!backup.ok) {
-        this.monitor.addAlert('warn', id, `Pre-restart backup failed, continuing with the restart: ${backup.error}`);
+        this.monitor.addAlert('warn', id, `Pre-restart backup failed, continuing with the restart: ${backup.error}`, 'backup');
       }
     }
 
-    await delay(5000);
+    await delay(RESTART_GAP_MS);
     const started = await this.start(id);
     this.monitor.addAlert('info', id, 'Restart complete');
     return { ok: started.ok, forced: stopped.forced, error: started.error, backup: backup?.file ?? null };

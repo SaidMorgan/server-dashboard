@@ -8,6 +8,11 @@
 // Auth is HTTP Basic with username "admin" and the server's AdminPassword.
 // Docs: https://docs.palworldgame.com/api/rest-api/
 
+// --- tunables ---------------------------------------------------------------
+// How long any single REST call gets before it's abandoned. The dashboard polls
+// on a 10s loop by default, so this has to stay comfortably under that.
+const REQUEST_TIMEOUT_MS = 6000;
+
 function authHeader(password) {
   return 'Basic ' + Buffer.from(`admin:${password}`).toString('base64');
 }
@@ -15,7 +20,7 @@ function authHeader(password) {
 async function call(target, method, path, body) {
   const base = `http://${target.host}:${target.restPort}/v1/api`;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 6000);
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     const res = await fetch(base + path, {
       method,

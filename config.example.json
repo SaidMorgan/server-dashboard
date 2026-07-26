@@ -1,26 +1,76 @@
+// Comments are allowed in this file — // and /* */ both work.
+// ${VAR} is read from the environment or from .env, so no password is ever
+// written here. Every value below is optional; these are the defaults.
 {
   "port": 8770,
+
+  // Loopback only by default. Binding to 0.0.0.0 exposes the dashboard to your
+  // network and requires auth.password to be set — the app refuses otherwise.
   "bind": "127.0.0.1",
+
+  // How often every target is polled, in seconds. Below ~5 you are mostly
+  // hammering your own servers.
   "pollSeconds": 10,
+
+  // How much per-target history the graphs keep, in hours.
   "historyHours": 48,
 
   "auth": {
     "password": "${DASHBOARD_PASSWORD}",
-    "sessionDays": 30
+    "sessionDays": 30       // how long a login lasts before you sign in again
   },
 
   "notifications": {
-    "windowsToast": true,
+    "windowsToast": true,   // desktop balloon on errors, for a machine you sit at
+
+    // Anti-spam. An identical message is sent at most once per dedupeSeconds,
+    // and never more than maxPerMinute in total, so a server that flaps up and
+    // down can't flood the channel or get your webhook rate-limited.
+    "dedupeSeconds": 60,
+    "maxPerMinute": 10,
+
     "discord": {
       "enabled": false,
       "url": "${DISCORD_WEBHOOK_URL}",
-      "events": ["error", "warn"]
+
+      // Which levels this channel wants.
+      "events": ["error", "warn"],
+
+      // Categories to drop regardless of level. "backup" is the only one so
+      // far: backup successes and failures are routine bookkeeping, better read
+      // in the dashboard than pushed to everyone's phone. The activity feed
+      // always keeps them either way.
+      "mute": ["backup"]
     },
     "webhook": {
       "enabled": false,
       "url": "",
       "events": ["error"]
     }
+  },
+
+  // Defaults for every target's backups. Per-target "backup" blocks win.
+  "backups": {
+    // Seconds given to a save command to reach disk before the copy starts.
+    "flushSeconds": 4,
+
+    // Ceilings, not expected durations. A large world is slow, and a backup
+    // that takes 15 minutes beats one killed at 5.
+    "stageTimeoutMinutes": 10,
+    "zipTimeoutMinutes": 20
+  },
+
+  "alerts": {
+    // Alerts kept in the activity feed and data/alerts.json. This is a
+    // recent-activity view, not an audit log.
+    "keep": 200
+  },
+
+  "restart": {
+    // Extra seconds after a shutdown countdown ends before the process is
+    // force-killed. The countdown ends when the server *starts* exiting;
+    // flushing a large world to disk happens after that.
+    "graceSeconds": 90
   },
 
   "targets": [
@@ -47,11 +97,22 @@
 
       "backup": {
         "enabled": true,
+
+        // Folders to archive. Everything here lands in one zip per run.
         "paths": [
           "C:\\Program Files (x86)\\Steam\\steamapps\\common\\ARK Survival Ascended Dedicated Server\\ShooterGame\\Saved\\SavedArks"
         ],
+
+        // How many archives to keep. Retention is by COUNT, not age: nothing
+        // expires for being old, and the oldest is deleted only after a
+        // successful backup. Watch the disk — a big world is ~300 MB a copy.
         "keep": 10,
+
+        // Also back up automatically just before any restart, while the save
+        // files are at rest. The last chance to roll back a bad update.
         "beforeRestart": true
+
+        // "dir": "D:\\Backups\\ark"   // optional; defaults to backups/<id>
       },
 
       "schedules": [
