@@ -15,9 +15,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ps, winPath } from './win.js';
 
-const STAGE_TIMEOUT = 10 * 60 * 1000;
-const ZIP_TIMEOUT = 20 * 60 * 1000;
-const FLUSH_MS = 4000;
+// The knobs live in config.json under `backups` (flushSeconds,
+// stageTimeoutMinutes, zipTimeoutMinutes) and per target under `backup`
+// (paths, keep, dir, beforeRestart). These are the fallbacks for a Backups
+// built without them.
+//
+// Worth knowing about retention: it is by count, not age. Nothing expires a
+// backup for being old, and prune() runs only after a *successful* backup, so a
+// run of failures never eats the archives you still have.
+const DEFAULT_KEEP = 10;
+const DEFAULT_FLUSH_SECONDS = 4;
+const DEFAULT_STAGE_TIMEOUT_MINUTES = 10;
+const DEFAULT_ZIP_TIMEOUT_MINUTES = 20;
 
 const stamp = (d) => {
   const p = (n) => String(n).padStart(2, '0');
@@ -27,6 +36,12 @@ const stamp = (d) => {
 // Single-quoted for PowerShell, and always with Windows separators.
 const quote = (s) => `'${winPath(s).replace(/'/g, "''")}'`;
 
+// Start-Process joins -ArgumentList with spaces and adds no quoting of its own,
+// so each path has to carry its own double quotes. Without them "C:\Program
+// Files (x86)\..." arrives as three arguments and robocopy fails with exit 16.
+// Trailing backslashes go, too: a path ending in one would escape the quote.
+const arg = (s) => `'"${winPath(s).replace(/\\+$/, '').replace(/'/g, "''")}"'`;
+
 // robocopy exit codes below 8 all mean success; 8 and above are real failures.
 //
 // /B is backup mode, which is what lets us read files a running server holds
@@ -34,14 +49,14 @@ const quote = (s) => `'${winPath(s).replace(/'/g, "''")}'`;
 // that when installed as a service (LocalSystem) or run elevated, and does not
 // when run as a plain user, where robocopy fails with exit 16. So try backup
 // mode, and fall back to an ordinary copy rather than failing outright.
-async function robocopy(src, dest, mode = '/E') {
-  const args = (extra) => [quote(src), quote(dest), `'${mode}'`, ...extra,
+async function robocopy(src, dest, mode = '/E', timeout = DEFAULT_STAGE_TIMEOUT_MINUTES * 60_000) {
+  const args = (extra) => [arg(src), arg(dest), `'${mode}'`, ...extra,
     "'/R:1'", "'/W:1'", "'/NFL'", "'/NDL'", "'/NJH'", "'/NJS'", "'/NP'"].join(', ');
 
   const run = (extra) => ps(
     `$p = Start-Process robocopy -ArgumentList @(${args(extra)}) -Wait -PassThru -WindowStyle Hidden
      if ($p.ExitCode -ge 8) { throw "robocopy exit code $($p.ExitCode)" }`,
-    STAGE_TIMEOUT,
+    timeout,
   );
 
   const withBackupMode = await run(["'/B'"]);
@@ -60,6 +75,11 @@ export class Backups {
     this.monitor = monitor;
     this.actions = actions;
     this.running = new Set(); // target ids with a backup in flight
+
+    const tune = config.backups || {};
+    this.flushMs = (tune.flushSeconds ?? DEFAULT_FLUSH_SECONDS) * 1000;
+    this.stageTimeout = (tune.stageTimeoutMinutes ?? DEFAULT_STAGE_TIMEOUT_MINUTES) * 60_000;
+    this.zipTimeout = (tune.zipTimeoutMinutes ?? DEFAULT_ZIP_TIMEOUT_MINUTES) * 60_000;
   }
 
   target(id) {
@@ -88,7 +108,7 @@ export class Backups {
   // Deleting the oldest archives once we're over the retention count.
   prune(id) {
     const t = this.target(id);
-    const keep = Math.max(1, t.backup?.keep ?? 10);
+    const keep = Math.max(1, t.backup?.keep ?? DEFAULT_KEEP);
     const dir = this.dirFor(id);
     const removed = [];
     for (const entry of this.list(id).slice(keep)) {
@@ -108,7 +128,10 @@ export class Backups {
     if (!paths.length) return { ok: false, error: 'no backup.paths configured for this target' };
 
     const missing = paths.filter((p) => !fs.existsSync(p));
-    if (missing.length) return { ok: false, error: `path does not exist: ${missing[0]}` };
+    if (missing.length) {
+      console.error(`[backup] ${id}: missing source path ${missing[0]}`);
+      return { ok: false, error: `source folder is missing: ${path.basename(missing[0])}` };
+    }
 
     if (this.running.has(id)) return { ok: false, error: 'a backup is already running for this target' };
     this.running.add(id);
@@ -126,7 +149,7 @@ export class Backups {
       const up = this.monitor.state.get(id)?.up;
       if (save && up && this.actions) {
         await this.actions.save(id).catch(() => {});
-        await new Promise((r) => setTimeout(r, FLUSH_MS));
+        await new Promise((r) => setTimeout(r, this.flushMs));
       }
 
       // Stage a copy first: robocopy can read files a running server holds
@@ -135,10 +158,13 @@ export class Backups {
       let lockedFileSafe = true;
       for (const src of paths) {
         const dest = path.join(staging, path.basename(src));
-        const res = await robocopy(src, dest);
-        // Keep the path in the JS-side message; embedding it in the PowerShell
-        // string is a quoting hazard for no benefit.
-        if (!res.ok) throw new Error(`could not copy ${src}: ${res.error || 'staging copy failed'}`);
+        const res = await robocopy(src, dest, '/E', this.stageTimeout);
+        if (!res.ok) {
+          // The alert names the folder; the full path goes to the service log.
+          // A 70-character path is unreadable in the feed and useless on a phone.
+          console.error(`[backup] ${id}: robocopy failed for ${src} — ${res.error}`);
+          throw new Error(`could not copy ${path.basename(src)} — ${res.error || 'staging copy failed'}`);
+        }
         if (!res.backupMode) lockedFileSafe = false;
       }
 
@@ -147,13 +173,12 @@ export class Backups {
       if (!lockedFileSafe && this.monitor.state.get(id)?.up && !this.warnedNoBackupMode) {
         this.warnedNoBackupMode = true;
         this.monitor.addAlert('warn', id,
-          'Backing up a running server without the Backup Files privilege — files the server holds open may be skipped. ' +
-          'Run the dashboard elevated, or install it as a service, for reliable hot backups.');
+          'No Backup Files privilege — open files may be skipped. Run as a service or elevated.', 'backup');
       }
 
       const res = await ps(
         `Compress-Archive -Path (Join-Path ${quote(staging)} '*') -DestinationPath ${quote(archive)} -CompressionLevel Optimal -Force`,
-        ZIP_TIMEOUT,
+        this.zipTimeout,
       );
       if (!res.ok) throw new Error(res.error || 'Compress-Archive failed');
       if (!fs.existsSync(archive)) throw new Error('archive was not created');
@@ -164,11 +189,11 @@ export class Backups {
 
       this.monitor.addAlert('info', id,
         `Backup complete (${reason}) — ${formatBytes(bytes)} in ${Math.round(ms / 1000)}s` +
-        (removed.length ? `, pruned ${removed.length} old` : ''));
+        (removed.length ? `, pruned ${removed.length} old` : ''), 'backup');
 
       return { ok: true, file: path.basename(archive), bytes, ms, pruned: removed.length };
     } catch (err) {
-      this.monitor.addAlert('error', id, `Backup failed (${reason}): ${err.message}`);
+      this.monitor.addAlert('error', id, `Backup failed (${reason}): ${err.message}`, 'backup');
       try { if (fs.existsSync(archive)) fs.unlinkSync(archive); } catch { /* nothing useful to do */ }
       return { ok: false, error: err.message };
     } finally {
@@ -203,7 +228,7 @@ export class Backups {
       // oldest, pruning would delete the very file we are restoring from.
       const unzip = await ps(
         `Expand-Archive -Path ${quote(archive)} -DestinationPath ${quote(staging)} -Force`,
-        ZIP_TIMEOUT,
+        this.zipTimeout,
       );
       if (!unzip.ok) throw new Error(unzip.error || 'Expand-Archive failed');
 
@@ -215,7 +240,7 @@ export class Backups {
         if (!fs.existsSync(src)) throw new Error(`archive has no folder named ${path.basename(dest)}`);
         // /MIR makes the destination match the archive exactly, which is what
         // "restore" has to mean — a merge would leave newer stray files behind.
-        const res = await robocopy(src, dest, '/MIR');
+        const res = await robocopy(src, dest, '/MIR', this.stageTimeout);
         if (!res.ok) throw new Error(`could not restore into ${dest}: ${res.error || 'restore copy failed'}`);
       }
 
