@@ -3,14 +3,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, ConfigError, isLoopback } from './src/config.js';
+import { loadConfig, ConfigError, isLoopback, validateCron } from './src/config.js';
 import { loadUserProfiles, getProfile } from './src/games/index.js';
 import { createAuth, assertBindIsSafe, UnsafeBindError } from './src/auth.js';
 import { Monitor } from './src/monitor.js';
 import { Actions } from './src/actions.js';
 import { Backups } from './src/backup.js';
 import { Notifier } from './src/notify.js';
-import { Scheduler } from './src/scheduler.js';
+import { Scheduler, describeCron, nextRun } from './src/scheduler.js';
 import { closeAll } from './src/rcon.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -187,6 +187,16 @@ app.get('/api/stream', (req, res) => {
 // --- schedules -------------------------------------------------------------
 
 app.get('/api/schedules', (_req, res) => res.json(scheduler.jobs()));
+
+// Explains a cron expression before it is saved, so the form can say "daily at
+// 05:00, next in 7h" while it is being typed. Same code the scheduler runs on,
+// so the preview can't disagree with what actually happens.
+app.get('/api/schedules/preview', (req, res) => {
+  const cron = String(req.query.cron || '');
+  const error = validateCron(cron);
+  if (error) return res.json({ ok: false, error });
+  return res.json({ ok: true, description: describeCron(cron), nextRun: nextRun(cron) });
+});
 
 app.post('/api/schedules', (req, res) => {
   const result = scheduler.add(req.body || {});

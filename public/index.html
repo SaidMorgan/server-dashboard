@@ -98,21 +98,69 @@
       <details class="section schedules">
         <summary>Schedules</summary>
         <ul class="schedulelist"></ul>
-        <div class="btnrow sched-form">
-          <input class="sched-cron" type="text" placeholder="0 5 * * *" spellcheck="false"
-                 title="minute hour day month weekday" />
-          <select class="sched-action">
-            <option value="restart">Restart</option>
-            <option value="backup">Back up</option>
-            <option value="save">Save</option>
-            <option value="broadcast">Broadcast</option>
-            <option value="start">Start</option>
-            <option value="stop">Stop</option>
-          </select>
-          <input class="sched-warn" type="number" min="0" max="60" value="15" title="warn players this many minutes first" />
-          <button class="btn sched-add">Add</button>
+        <div class="sched-form">
+          <div class="sched-field">
+            <label class="sched-label">Do what</label>
+            <select class="sched-action">
+              <option value="restart">Restart</option>
+              <option value="backup">Back up</option>
+              <option value="save">Save</option>
+              <option value="broadcast">Broadcast</option>
+              <option value="start">Start</option>
+              <option value="stop">Stop</option>
+            </select>
+          </div>
+
+          <div class="sched-field sched-field-when">
+            <label class="sched-label">How often</label>
+            <select class="sched-preset">
+              <option value="0 5 * * *">Every day at 05:00</option>
+              <option value="0 3 * * *">Every day at 03:00</option>
+              <option value="0 */6 * * *">Every 6 hours</option>
+              <option value="0 */12 * * *">Every 12 hours</option>
+              <option value="30 4 * * 0">Every Sunday at 04:30</option>
+              <option value="*/30 * * * *">Every 30 minutes</option>
+              <option value="custom">Custom (write it myself)…</option>
+            </select>
+          </div>
+
+          <div class="sched-field sched-field-warn">
+            <label class="sched-label">Warn players first</label>
+            <div class="sched-inline">
+              <input class="sched-warn" type="number" min="0" max="60" value="15" />
+              <span class="sched-unit">min (0 = no warning)</span>
+            </div>
+          </div>
+
+          <div class="sched-field sched-field-add">
+            <button class="btn sched-add">Add schedule</button>
+          </div>
         </div>
-        <input class="sched-message hidden" type="text" placeholder="Broadcast message" />
+
+        <div class="sched-field sched-field-cron hidden">
+          <label class="sched-label">Cron expression</label>
+          <input class="sched-cron" type="text" placeholder="0 5 * * *" spellcheck="false" />
+          <div class="sched-legend">
+            <span><b>0</b> minute <span class="dim">0–59</span></span>
+            <span><b>5</b> hour <span class="dim">0–23</span></span>
+            <span><b>*</b> day of month <span class="dim">1–31</span></span>
+            <span><b>*</b> month <span class="dim">1–12</span></span>
+            <span><b>*</b> weekday <span class="dim">0–6, Sun=0</span></span>
+          </div>
+          <div class="sched-legend sched-legend-syntax">
+            <span><b>*</b> = every</span>
+            <span><b>*/5</b> = every 5th</span>
+            <span><b>1-4</b> = a range</span>
+            <span><b>1,4</b> = a list</span>
+          </div>
+        </div>
+
+        <div class="sched-field sched-field-message hidden">
+          <label class="sched-label">Message to send</label>
+          <input class="sched-message" type="text" placeholder="Server restarting shortly!" />
+        </div>
+
+        <div class="sched-preview">Pick a schedule above.</div>
         <div class="sched-hint">Times use this machine's clock. Jobs from config.json are read-only here.</div>
       </details>
 

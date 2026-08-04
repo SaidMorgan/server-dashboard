@@ -449,30 +449,76 @@ function render(snap, pending) {
 function wireSchedules(target, node) {
   const details = node.querySelector('details.schedules');
   const actionSel = node.querySelector('.sched-action');
+  const presetSel = node.querySelector('.sched-preset');
+  const cronField = node.querySelector('.sched-field-cron');
+  const cronInput = node.querySelector('.sched-cron');
+  const messageField = node.querySelector('.sched-field-message');
   const messageInput = node.querySelector('.sched-message');
+  const warnField = node.querySelector('.sched-field-warn');
+  const preview = node.querySelector('.sched-preview');
+
+  // The cron box only appears for "Custom"; the presets cover what people
+  // actually schedule, and a five-field expression is nobody's idea of a hint.
+  const chosenCron = () => (presetSel.value === 'custom' ? cronInput.value.trim() : presetSel.value);
+
+  let previewSeq = 0;
+  async function refreshPreview() {
+    const cron = chosenCron();
+    if (!cron) {
+      preview.className = 'sched-preview';
+      preview.textContent = 'Write a cron expression above, e.g. 0 5 * * * for 05:00 daily.';
+      return;
+    }
+    // The server owns the cron rules, so ask it rather than keeping a second
+    // copy here that can drift. Out-of-order replies are dropped.
+    const seq = ++previewSeq;
+    const res = await api(`/api/schedules/preview?cron=${encodeURIComponent(cron)}`);
+    if (seq !== previewSeq) return;
+    if (!res.ok) {
+      preview.className = 'sched-preview bad';
+      preview.textContent = `That won't work — ${res.error}`;
+      return;
+    }
+    const what = actionSel.selectedOptions[0].textContent.toLowerCase();
+    preview.className = 'sched-preview good';
+    preview.textContent = `Will ${what} ${res.description} — first run ${fmtUntil(res.nextRun)}.`;
+  }
+
+  function syncForm() {
+    // Only a broadcast needs a message, and only a restart can warn players
+    // beforehand — the scheduler ignores warnMinutes on anything else.
+    messageField.classList.toggle('hidden', actionSel.value !== 'broadcast');
+    warnField.classList.toggle('hidden', actionSel.value !== 'restart');
+    cronField.classList.toggle('hidden', presetSel.value !== 'custom');
+    refreshPreview();
+  }
 
   details.addEventListener('toggle', function () {
-    if (this.open) loadSchedules(target.id, node);
+    if (this.open) { loadSchedules(target.id, node); syncForm(); }
   });
 
-  // Only a broadcast needs a message, so only show the box for one.
-  actionSel.addEventListener('change', () => {
-    messageInput.classList.toggle('hidden', actionSel.value !== 'broadcast');
-  });
+  actionSel.addEventListener('change', syncForm);
+  presetSel.addEventListener('change', syncForm);
+  cronInput.addEventListener('input', refreshPreview);
 
   node.querySelector('.sched-add').addEventListener('click', async () => {
     const body = {
       targetId: target.id,
-      cron: node.querySelector('.sched-cron').value.trim(),
+      cron: chosenCron(),
       action: actionSel.value,
       warnMinutes: Number(node.querySelector('.sched-warn').value) || 0,
       message: messageInput.value.trim() || null,
     };
     const res = await api('/api/schedules', { method: 'POST', body: JSON.stringify(body) });
-    if (!res.ok) { alert(res.error); return; }
-    node.querySelector('.sched-cron').value = '';
+    if (!res.ok) {
+      preview.className = 'sched-preview bad';
+      preview.textContent = `Not added — ${res.error}`;
+      return;
+    }
+    cronInput.value = '';
     messageInput.value = '';
     loadSchedules(target.id, node);
+    syncForm();
   });
 }
 
@@ -481,7 +527,7 @@ async function loadSchedules(id, node) {
   const list = node.querySelector('.schedulelist');
 
   if (!rows.length) {
-    list.innerHTML = '<li class="empty">nothing scheduled</li>';
+    list.innerHTML = '<li class="empty">nothing scheduled yet — add one below</li>';
     return;
   }
 

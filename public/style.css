@@ -210,13 +210,37 @@ details.logs summary {
 .schedulelist .next { color: var(--dim); font-size: 11px; flex: none; }
 .schedulelist .locked { color: var(--dim); font-style: italic; }
 .schedulelist .empty { color: var(--dim); font-style: italic; font-family: inherit; }
-.sched-form select {
+.sched-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+.sched-form select, .sched-field select {
   background: #0d1117; border: 1px solid var(--line); border-radius: 6px;
-  color: var(--text); padding: 6px 8px; font-size: 13px;
+  color: var(--text); padding: 6px 8px; font-size: 13px; width: 100%;
 }
-.sched-form .sched-warn { flex: 0 0 60px; }
+.sched-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.sched-field-when { flex: 1 1 170px; }
+.sched-field-warn { flex: 0 0 auto; }
+.sched-field-add { flex: 0 0 auto; }
+.sched-label { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.sched-inline { display: flex; align-items: center; gap: 6px; }
+.sched-inline .sched-warn { flex: 0 0 56px; }
+.sched-unit { color: var(--dim); font-size: 11px; }
+
+.sched-field-cron, .sched-field-message { margin-top: 10px; }
+.sched-cron { width: 100%; font-family: var(--mono); }
+
+/* What each of the five fields means, under the box you type them into. */
+.sched-legend {
+  display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 5px;
+  color: var(--dim); font-size: 11px;
+}
+.sched-legend b { color: var(--accent); font-family: var(--mono); font-weight: 600; }
+.sched-legend .dim { opacity: .65; }
+.sched-legend-syntax { margin-top: 2px; }
+
+.sched-preview { font-size: 12px; margin-top: 10px; color: var(--dim); }
+.sched-preview.good { color: var(--accent); }
+.sched-preview.bad { color: var(--bad); }
 .sched-hint { color: var(--dim); font-size: 11px; margin-top: 6px; }
-.sched-message { margin-top: 8px; width: 100%; }
+.sched-message { width: 100%; }
 
 /* Backups */
 .backuplist { list-style: none; margin: 8px 0 0; padding: 0; font-size: 12px; font-family: var(--mono); }
