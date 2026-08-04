@@ -112,7 +112,7 @@ export class Actions {
     this.monitor.suppress(id, true);
     setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_START_MS).unref?.();
     const res = launchDetached(t.startCommand);
-    if (res.ok) this.monitor.addAlert('info', id, 'Start requested from dashboard');
+    if (res.ok) this.monitor.addAlert('info', id, 'Start requested from dashboard', 'restart');
     return res;
   }
 
@@ -132,7 +132,7 @@ export class Actions {
     // table is the only handle we have. Most such servers save on SIGTERM.
     if (profile.transport === 'none') {
       await killProcess(t.processName);
-      this.monitor.addAlert('info', id, 'Stopped (no remote interface — process terminated)');
+      this.monitor.addAlert('info', id, 'Stopped (no remote interface — process terminated)', 'restart');
       setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_SETTLE_MS).unref?.();
       return { ok: true, saved: false, forced: true };
     }
@@ -164,14 +164,17 @@ export class Actions {
       await delay(STOP_POLL_MS);
       const snap = await this.monitor.pollOnce().then((s) => s.find((x) => x.id === id));
       if (!snap?.up) {
-        this.monitor.addAlert('info', id, 'Stopped cleanly');
+        this.monitor.addAlert('info', id, 'Stopped cleanly', 'restart');
         setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_SETTLE_MS).unref?.();
         return { ok: true, saved: saved.ok, forced: false };
       }
     }
 
     await killProcess(t.processName);
-    this.monitor.addAlert('warn', id, 'Did not exit on request — process was force-killed');
+    // A warn, but still part of a stop somebody asked for: the dashboard wanted
+    // it down and it is down. The feed records how it went; the channel doesn't
+    // need it.
+    this.monitor.addAlert('warn', id, 'Did not exit on request — process was force-killed', 'restart');
     setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_SETTLE_MS).unref?.();
     return { ok: true, saved: saved.ok, forced: true };
   }
@@ -182,8 +185,10 @@ export class Actions {
       this.monitor.suppress(id, true);
       setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_SERVICE_MS).unref?.();
       const res = await controlService(t.serviceName, 'restart', t.nssm);
-      this.monitor.addAlert(res.ok ? 'info' : 'error', id,
-        res.ok ? 'Service restarted' : `Restart failed: ${res.error}`);
+      // A restart that worked is bookkeeping; one that failed is an issue, so
+      // only the success carries the mutable category.
+      if (res.ok) this.monitor.addAlert('info', id, 'Service restarted', 'restart');
+      else this.monitor.addAlert('error', id, `Restart failed: ${res.error}`);
       return res;
     }
 
@@ -203,7 +208,7 @@ export class Actions {
 
     await delay(RESTART_GAP_MS);
     const started = await this.start(id);
-    this.monitor.addAlert('info', id, 'Restart complete');
+    this.monitor.addAlert('info', id, 'Restart complete', 'restart');
     return { ok: started.ok, forced: stopped.forced, error: started.error, backup: backup?.file ?? null };
   }
 
@@ -221,19 +226,19 @@ export class Actions {
       const fireIn = (minutes - m) * 60_000;
       timers.push(setTimeout(() => {
         this.broadcast(id, `Server restarting in ${m} minute${m === 1 ? '' : 's'} - ${reason}`).catch(() => {});
-        this.monitor.addAlert('info', id, `Warned players: ${m} minute(s) to restart`);
+        this.monitor.addAlert('info', id, `Warned players: ${m} minute(s) to restart`, 'restart');
       }, fireIn));
     }
 
     timers.push(setTimeout(async () => {
       this.pending.delete(id);
-      this.monitor.addAlert('warn', id, 'Countdown finished — restarting now');
+      this.monitor.addAlert('warn', id, 'Countdown finished — restarting now', 'restart');
       await this.restartNow(id);
     }, minutes * 60_000));
 
     this.pending.set(id, { timers, finishAt, reason });
     this.broadcast(id, `Server restarting in ${minutes} minutes - ${reason}`).catch(() => {});
-    this.monitor.addAlert('info', id, `Restart scheduled in ${minutes} minute(s)`);
+    this.monitor.addAlert('info', id, `Restart scheduled in ${minutes} minute(s)`, 'restart');
     return { ok: true, finishAt };
   }
 
@@ -243,7 +248,7 @@ export class Actions {
     p.timers.forEach(clearTimeout);
     this.pending.delete(id);
     this.broadcast(id, 'Restart cancelled').catch(() => {});
-    this.monitor.addAlert('info', id, 'Scheduled restart cancelled');
+    this.monitor.addAlert('info', id, 'Scheduled restart cancelled', 'restart');
     return { ok: true };
   }
 

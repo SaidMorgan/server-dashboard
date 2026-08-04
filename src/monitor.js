@@ -78,9 +78,10 @@ export class Monitor {
   // The single funnel every event in the dashboard passes through, which is why
   // notifications and the live stream hook in here and nowhere else.
   //
-  // `category` is optional and coarse ('backup', and nothing else so far). It
+  // `category` is optional and coarse ('backup', 'restart', 'recovery'). It
   // exists so a notification channel can mute a class of event that is worth
-  // recording but not worth a phone buzz — see notifications.*.mute.
+  // recording but not worth a phone buzz, or force one through below its level
+  // threshold — see notifications.*.mute and .always.
   addAlert(level, targetId, message, category = null) {
     const alert = { t: Date.now(), level, targetId, message };
     if (category) alert.category = category;
@@ -277,7 +278,11 @@ export class Monitor {
       this.#armWatchdog(snap.id);
     } else if (!prev.up && snap.up) {
       this.#disarmWatchdog(snap.id);
-      this.addAlert('info', snap.id, 'Back online');
+      // Only reachable after an outage nobody asked for — a managed restart
+      // sets the suppressed flag above and never gets this far. That makes it
+      // the all-clear to the error above rather than routine chatter, so it is
+      // worth pushing to a channel that otherwise only wants problems.
+      this.addAlert('info', snap.id, 'Back online', 'recovery');
     }
 
     if (snap.kind === 'game' && prev.rcon === 'ok' && snap.rcon === 'error') {

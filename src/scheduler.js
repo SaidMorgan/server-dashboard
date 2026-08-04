@@ -234,7 +234,7 @@ export class Scheduler {
           if (job.warnMinutes > 0 && action === 'restart') {
             return this.actions.scheduleRestart(targetId, job.warnMinutes, job.reason);
           }
-          this.monitor.addAlert('info', targetId, `Scheduled ${action} starting now — ${job.reason}`);
+          this.monitor.addAlert('info', targetId, `Scheduled ${action} starting now — ${job.reason}`, 'restart');
           return action === 'stop'
             ? await this.actions.stop(targetId)
             : await this.actions.restartNow(targetId);

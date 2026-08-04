@@ -34,16 +34,25 @@ export class Notifier {
   }
 
   // A channel takes an alert when the level is one it asked for and the
-  // category is not one it muted. Muting is per-channel on purpose: backup
-  // chatter belongs in the dashboard's activity feed, which keeps every alert
-  // regardless, not in a chat channel people actually read.
+  // category is not one it muted. Routing is per-channel on purpose: restart
+  // and backup chatter belongs in the dashboard's activity feed, which keeps
+  // every alert regardless, not in a chat channel people actually read.
+  //
+  // The two lists pull in opposite directions, which is the point. `mute` drops
+  // a category however loud it is, so a noisy planned restart stays off the
+  // channel even when one of its steps is a warn. `always` does the reverse and
+  // lets a category through below the level threshold, so 'Back online' — an
+  // info, and good news — still lands for a channel that otherwise only wants
+  // problems. mute wins if a category is somehow in both; config validation
+  // rejects that combination anyway.
   #channels(level, category) {
     const out = [];
     for (const name of ['discord', 'webhook']) {
       const c = this.config[name];
       if (!c?.enabled || !c.url) continue;
-      if (!(c.events || []).includes(level)) continue;
       if (category && (c.mute || []).includes(category)) continue;
+      const forced = category && (c.always || []).includes(category);
+      if (!forced && !(c.events || []).includes(level)) continue;
       out.push([name, c]);
     }
     return out;

@@ -36,11 +36,17 @@
       // Which levels this channel wants.
       "events": ["error", "warn"],
 
-      // Categories to drop regardless of level. "backup" is the only one so
-      // far: backup successes and failures are routine bookkeeping, better read
-      // in the dashboard than pushed to everyone's phone. The activity feed
-      // always keeps them either way.
-      "mute": ["backup"]
+      // Categories to drop regardless of level. Backups and planned restarts
+      // are routine bookkeeping, better read in the dashboard than pushed to
+      // everyone's phone — a nightly reset that goes to plan says nothing you
+      // didn't already know was coming. The activity feed keeps them either way.
+      "mute": ["backup", "restart"],
+
+      // The reverse: categories to send even when their level isn't in
+      // "events". "recovery" is the all-clear after an unplanned outage — it's
+      // only an info, but if the crash was worth waking up for, so is the news
+      // that the server came back.
+      "always": ["recovery"]
     },
     "webhook": {
       "enabled": false,

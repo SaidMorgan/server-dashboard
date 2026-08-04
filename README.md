@@ -180,7 +180,8 @@ startup. Waking up to a queue of missed 3am restarts is worse than missing them.
     "enabled": true,
     "url": "${DISCORD_WEBHOOK_URL}",
     "events": ["error", "warn"],
-    "mute": ["backup"]        // optional: categories this channel skips
+    "mute": ["backup", "restart"],  // categories this channel skips
+    "always": ["recovery"]          // categories it takes at any level
   }
 }
 ```
@@ -189,12 +190,29 @@ startup. Waking up to a queue of missed 3am restarts is worse than missing them.
 messages are suppressed for a minute and there's a hard ceiling of 10 per
 minute, so a flapping server can't flood your channel.
 
-`events` picks the levels a channel wants; `mute` drops whole categories from
-it regardless of level. `backup` is the only category so far, and muting it is
-the default: backup successes and failures are routine bookkeeping, better read
-in the dashboard's activity feed than pushed to everyone's phone. The feed and
-the alerts API always keep every alert — `mute` only decides what leaves the
-machine. Restores stay un-muted; they overwrite a live world and are worth an
+`events` picks the levels a channel wants. `mute` and `always` then adjust that
+by category — how loud an alert is and what kind of thing it is are different
+questions, and a channel usually wants to filter on both. The three categories:
+
+| Category | Covers | Default |
+| --- | --- | --- |
+| `backup` | Archive successes and failures | muted |
+| `restart` | Planned stop/start chatter, scheduled or clicked | muted |
+| `recovery` | A target back up after an unplanned outage | always |
+
+`mute` drops a category however loud it is, which is what keeps a nightly reset
+that went to plan off your channel — the countdown's closing warn is still a
+`warn`, it just isn't news. `always` does the reverse, sending a category that
+sits below the level threshold: "Back online" is only an `info`, but it's the
+all-clear to a crash you were paged about, so it goes out. It's only ever
+reached after an unplanned outage — a managed restart is suppressed and never
+raises it.
+
+The defaults above leave a channel that carries real problems and nothing else:
+crashes, failed schedules, RCON dropping out, a failing health check, and the
+recovery that closes them out. The activity feed and the alerts API always keep
+every alert regardless — these lists only decide what leaves the machine.
+Restores stay un-muted; they overwrite a live world and are worth an
 interruption.
 
 ### A Windows service target

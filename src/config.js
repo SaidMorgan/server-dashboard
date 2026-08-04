@@ -219,9 +219,14 @@ function deepDefaults(value, defaults) {
 const SCHEDULE_ACTIONS = ['restart', 'start', 'stop', 'save', 'backup', 'broadcast'];
 const ALERT_LEVELS = ['info', 'warn', 'error'];
 
-// Categories a notification channel can mute. The dashboard's own activity feed
-// always shows everything; this only decides what leaves the machine.
-const ALERT_CATEGORIES = ['backup'];
+// Categories a notification channel can mute or force through. The dashboard's
+// own activity feed always shows everything; this only decides what leaves the
+// machine.
+//
+//   backup    archive successes and failures
+//   restart   planned stop/start chatter, whether scheduled or clicked
+//   recovery  a target coming back up after an unplanned outage
+const ALERT_CATEGORIES = ['backup', 'restart', 'recovery'];
 
 function check(errors, cond, message) {
   if (!cond) errors.push(message);
@@ -275,15 +280,25 @@ function validateNotificationChannel(channel, where, errors) {
     }
   }
 
-  if (channel.mute !== undefined) {
-    if (!Array.isArray(channel.mute)) {
-      errors.push(`${where}.mute: expected an array of ${ALERT_CATEGORIES.join('/')}`);
-    } else {
-      for (const c of channel.mute) {
-        if (!ALERT_CATEGORIES.includes(c)) {
-          errors.push(`${where}.mute: "${c}" is not a category (expected ${ALERT_CATEGORIES.join(', ')})`);
-        }
+  for (const key of ['mute', 'always']) {
+    const list = channel[key];
+    if (list === undefined) continue;
+    if (!Array.isArray(list)) {
+      errors.push(`${where}.${key}: expected an array of ${ALERT_CATEGORIES.join('/')}`);
+      continue;
+    }
+    for (const c of list) {
+      if (!ALERT_CATEGORIES.includes(c)) {
+        errors.push(`${where}.${key}: "${c}" is not a category (expected ${ALERT_CATEGORIES.join(', ')})`);
       }
+    }
+  }
+
+  // Listing a category in both is a contradiction, and silently picking a
+  // winner would leave someone wondering why their alerts vanished.
+  for (const c of channel.always || []) {
+    if ((channel.mute || []).includes(c)) {
+      errors.push(`${where}: "${c}" is in both mute and always — pick one`);
     }
   }
 }
