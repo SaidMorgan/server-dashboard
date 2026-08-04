@@ -50,6 +50,11 @@
         <ul class="playerlist"></ul>
       </div>
 
+      <div class="section service-info hidden">
+        <h3>Endpoint</h3>
+        <ul class="infolist"></ul>
+      </div>
+
       <div class="section controls">
         <h3>Controls</h3>
         <div class="btnrow">
@@ -72,6 +77,12 @@
       <div class="section console game-only">
         <h3>RCON console</h3>
         <pre class="output"></pre>
+        <div class="btnrow rcon-pickrow hidden">
+          <select class="rcon-pick">
+            <option value="">Commands…</option>
+          </select>
+        </div>
+        <div class="cmd-help hidden"></div>
         <div class="btnrow">
           <input class="rcon-input" type="text" placeholder="e.g. listplayers" spellcheck="false" />
           <button class="btn rcon-send">Run</button>

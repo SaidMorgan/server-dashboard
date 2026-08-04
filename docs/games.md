@@ -169,6 +169,18 @@ export default {
     shutdown: 'quit',
   },
 
+  // Optional: the menu offered above the RCON console box. Anything in
+  // <angle brackets> is a value the user must supply — the UI selects it so
+  // typing replaces it, and refuses to send a command with one still in it.
+  // `danger: true` groups the command under a "Careful" heading and asks for
+  // confirmation before running it. The console still accepts any command you
+  // type, listed or not.
+  consoleCommands: [
+    { command: 'players', description: 'Who is online' },
+    { command: 'kick <name>', description: 'Disconnect one player' },
+    { command: 'quit', description: 'Shut the server down', danger: true },
+  ],
+
   // Turn the raw reply to commands.list into [{ name, id }].
   parsePlayers(body) {
     return (body || '').split('\n')

@@ -132,6 +132,80 @@ export async function getServiceState(serviceName) {
   return res.ok ? res.out : 'Unknown';
 }
 
+// Get-Service knows whether a service runs, but not which process is doing the
+// running — Win32_Service carries the PID, and from a PID the ordinary counters
+// follow. That is what lets a service card show uptime, CPU and RAM instead of
+// just "Running".
+//
+// CPU and memory are summed over the whole process tree, which matters for the
+// common NSSM setup: the service PID is nssm.exe, a ~8 MB supervisor, and the
+// application everyone actually cares about is its child. Reporting the wrapper
+// alone would show a busy API using 8 MB and no CPU.
+export async function getServiceProcess(serviceName) {
+  const script = `
+    $ErrorActionPreference = 'SilentlyContinue'
+    $svc = Get-CimInstance Win32_Service -Filter "Name='${serviceName}'"
+    if (-not $svc -or -not ($svc.ProcessId -gt 0)) { '{}'; return }
+
+    # One CIM query, then walk it in memory — a query per descendant would cost
+    # more than the poll interval on a busy machine.
+    # Everything comes from this one query. Get-Process would be the obvious way
+    # to read memory and CPU, but TotalProcessorTime throws Access Denied on a
+    # LocalSystem service unless we are elevated, and silently sums to zero.
+    # WorkingSetSize and the *ModeTime counters are readable either way.
+    $all = @(Get-CimInstance Win32_Process |
+      Select-Object ProcessId, ParentProcessId, CreationDate, WorkingSetSize, UserModeTime, KernelModeTime)
+    $byParent = @{}
+    foreach ($p in $all) {
+      $key = [string]$p.ParentProcessId
+      if (-not $byParent.ContainsKey($key)) { $byParent[$key] = @() }
+      $byParent[$key] += $p
+    }
+
+    $root = $all | Where-Object { $_.ProcessId -eq $svc.ProcessId } | Select-Object -First 1
+    if (-not $root) { '{}'; return }
+
+    $tree = @()
+    $queue = [System.Collections.Queue]::new()
+    $queue.Enqueue($root)
+    while ($queue.Count -gt 0) {
+      $cur = $queue.Dequeue()
+      $tree += $cur
+      # Windows reuses PIDs, so a stale parent id can point at a process that
+      # started before its "child" — that way lies an infinite loop.
+      foreach ($kid in $byParent[[string]$cur.ProcessId]) {
+        if ($kid.ProcessId -ne $cur.ProcessId -and $kid.CreationDate -ge $cur.CreationDate) {
+          $queue.Enqueue($kid)
+        }
+      }
+    }
+
+    # *ModeTime are in 100-nanosecond ticks.
+    $mem = 0; $ticks = 0
+    foreach ($t in $tree) {
+      $mem += [int64]$t.WorkingSetSize
+      $ticks += [int64]$t.UserModeTime + [int64]$t.KernelModeTime
+    }
+    $cpu = $ticks / 1e7
+
+    ConvertTo-Json -Compress -InputObject ([pscustomobject]@{
+      procId = $svc.ProcessId
+      procCount = $tree.Count
+      memMB = [math]::Round($mem / 1MB)
+      cpuSeconds = [math]::Round($cpu, 2)
+      startTime = $(if ($root.CreationDate) { $root.CreationDate.ToString('o') } else { $null })
+    })`;
+
+  const res = await ps(script);
+  if (!res.ok || !res.out) return null;
+  try {
+    const row = JSON.parse(res.out);
+    return row.procId ? row : null;
+  } catch {
+    return null; // a stat we can't read is a blank tile, not an error
+  }
+}
+
 export async function controlService(serviceName, action, nssmPath) {
   const verb = { start: 'start', stop: 'stop', restart: 'restart' }[action];
   if (!verb) return { ok: false, error: `unknown service action: ${action}` };

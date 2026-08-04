@@ -77,6 +77,7 @@ const publicTarget = (t) => {
     canBroadcast: Boolean(profile && (profile.transport === 'rest' || profile.commands?.broadcast)),
     canSave: Boolean(profile && (profile.transport === 'rest' || profile.commands?.save)),
     canConsole: Boolean(profile && profile.transport !== 'none'),
+    consoleCommands: profile?.consoleCommands ?? [],
     canStart: Boolean(t.startCommand) || t.kind === 'service',
     gamePort: t.gamePort ?? null, rconPort: t.rconPort ?? null,
     maxPlayers: t.maxPlayers ?? null, serviceName: t.serviceName ?? null,

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { rconCommand, getClient } from './rcon.js';
 import { getProfile } from './games/index.js';
-import { getProcessStats, getServiceState, checkHealth, toast } from './win.js';
+import { getProcessStats, getServiceState, getServiceProcess, checkHealth, toast } from './win.js';
 
 // --- tunables ---------------------------------------------------------------
 // Poll interval and history retention are per-install, so they live in
@@ -232,21 +232,36 @@ export class Monitor {
   }
 
   async #pollService(target) {
-    const [status, health] = await Promise.all([
+    // A health URL is optional: plenty of services are just "is it running?".
+    // Without one, the service state is the whole verdict — checking a URL that
+    // doesn't exist would report every such target as permanently down.
+    const checked = Boolean(target.healthUrl);
+    const [status, health, proc] = await Promise.all([
       getServiceState(target.serviceName),
-      checkHealth(target.healthUrl),
+      checked ? checkHealth(target.healthUrl) : Promise.resolve(null),
+      getServiceProcess(target.serviceName),
     ]);
+    const running = status === 'Running';
     return {
       id: target.id,
       name: target.name,
       kind: 'service',
-      up: status === 'Running' && health.ok,
+      up: running && (!checked || health.ok),
       serviceStatus: status,
-      healthy: health.ok,
-      httpStatus: health.status,
-      responseMs: health.ms,
-      healthBody: health.body ?? null,
-      healthError: health.error ?? null,
+      healthChecked: checked,
+      healthy: checked ? health.ok : null,
+      httpStatus: checked ? health.status : null,
+      responseMs: checked ? health.ms : null,
+      healthBody: checked ? (health.body ?? null) : null,
+      healthError: checked ? (health.error ?? null) : null,
+      healthUrl: target.healthUrl ?? null,
+      serviceName: target.serviceName ?? null,
+      // Same counters the game cards show, so a service card isn't a poor
+      // relation: the PID behind the service gives uptime, CPU and memory.
+      pid: proc?.procId ?? null,
+      cpu: running ? this.#cpuPercent(`service:${target.serviceName}`, proc?.cpuSeconds) : null,
+      memMB: proc?.memMB ?? null,
+      startedAt: proc?.startTime ?? null,
       checkedAt: Date.now(),
     };
   }

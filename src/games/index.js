@@ -41,6 +41,7 @@ function register(profile, origin) {
     label: profile.id,
     defaults: {},
     commands: null,
+    consoleCommands: [],
     rest: null,
     restVerbs: null,
     verbAliases: {},
@@ -55,6 +56,22 @@ function register(profile, origin) {
   if (normalized.transport.startsWith('rcon') && typeof normalized.parsePlayers !== 'function') {
     throw new Error(`game profile "${profile.id}"${where} needs a parsePlayers(body) function`);
   }
+
+  // The console dropdown is cosmetic, so a malformed list from a user profile
+  // costs them the menu, not the profile.
+  if (!Array.isArray(normalized.consoleCommands)) {
+    if (normalized.consoleCommands) {
+      console.error(`[games] "${normalized.id}"${where}: consoleCommands must be an array — ignoring it`);
+    }
+    normalized.consoleCommands = [];
+  }
+  normalized.consoleCommands = normalized.consoleCommands
+    .filter((c) => c && typeof c.command === 'string' && c.command.trim())
+    .map((c) => ({
+      command: c.command.trim(),
+      description: typeof c.description === 'string' ? c.description : '',
+      danger: Boolean(c.danger),
+    }));
 
   registry.set(normalized.id, normalized);
   return normalized;

@@ -21,6 +21,26 @@ export default {
     shutdown: 'stop',
   },
 
+  consoleCommands: [
+    { command: 'list', description: 'Who is online, and the player cap' },
+    { command: 'save-all', description: 'Flush all chunks to disk now' },
+    { command: 'save-off', description: 'Stop auto-saving — for taking a clean copy of the world', danger: true },
+    { command: 'save-on', description: 'Resume auto-saving after save-off' },
+    { command: 'say <message>', description: 'Server message in everyone\'s chat' },
+    { command: 'tell <player> <message>', description: 'Private message to one player' },
+    { command: 'kick <player>', description: 'Disconnect one player; they can rejoin' },
+    { command: 'ban <player>', description: 'Ban a player by name' },
+    { command: 'pardon <player>', description: 'Lift a ban' },
+    { command: 'op <player>', description: 'Grant operator (admin) rights' },
+    { command: 'deop <player>', description: 'Remove operator rights' },
+    { command: 'whitelist list', description: 'Show the whitelist' },
+    { command: 'time set day', description: 'Set the world to morning' },
+    { command: 'weather clear', description: 'Stop rain and storms' },
+    { command: 'difficulty <peaceful|easy|normal|hard>', description: 'Change the difficulty' },
+    { command: 'seed', description: 'Show the world seed' },
+    { command: 'stop', description: 'Save and shut the server down — it will not come back on its own', danger: true },
+  ],
+
   // "There are 3 of a max of 20 players online: Alice, Bob, Carol"
   // Some forks append extra sections after a second colon; take the first list.
   parsePlayers(body) {

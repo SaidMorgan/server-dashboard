@@ -27,6 +27,23 @@ export default {
     shutdown: 'doexit',
   },
 
+  // Offered in the console dropdown. `<angle brackets>` mark the part the user
+  // has to fill in — the UI selects the first one so typing replaces it.
+  consoleCommands: [
+    { command: 'listplayers', description: 'List connected players with their IDs' },
+    { command: 'saveworld', description: 'Force a world save to disk' },
+    { command: 'broadcast <message>', description: 'Large message across every player\'s screen' },
+    { command: 'serverchat <message>', description: 'Message in the chat panel only — easy to miss' },
+    { command: 'getchat', description: 'Recent in-game chat since the last time you asked' },
+    { command: 'getgamelog', description: 'Recent server log lines' },
+    { command: 'settimeofday <HH:MM:SS>', description: 'Set the in-game clock, e.g. 09:00:00' },
+    { command: 'kickplayer <steamID>', description: 'Disconnect one player; they can rejoin' },
+    { command: 'banplayer <steamID>', description: 'Ban a player until you unban them' },
+    { command: 'unbanplayer <steamID>', description: 'Lift a ban' },
+    { command: 'destroywilddinos', description: 'Wipe all WILD creatures so they respawn — tamed ones are untouched', danger: true },
+    { command: 'doexit', description: 'Save and shut the server down — it will not come back on its own', danger: true },
+  ],
+
   // ARK acknowledges output-less commands (broadcast, saveworld) with this
   // alarming-looking string. It means success; say so plainly.
   normalizeReply(res) {

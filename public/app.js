@@ -129,9 +129,25 @@ function buildCard(target) {
   }
 
   const rconInput = node.querySelector('.rcon-input');
+  wireCommandPicker(node, rconInput, caps.consoleCommands || []);
+
   const sendRcon = async () => {
     const command = rconInput.value.trim();
     if (!command) return;
+
+    // An unfilled <placeholder> would be sent verbatim — broadcasting the literal
+    // text "<message>" to everyone is a confusing way to find that out.
+    const blank = command.match(/<[^>]+>/);
+    if (blank) {
+      alert(`Replace ${blank[0]} with a real value first.`);
+      rconInput.focus();
+      selectPlaceholder(rconInput);
+      return;
+    }
+
+    const known = findCommand(caps.consoleCommands, command);
+    if (known?.danger && !confirm(`${command}\n\n${known.description}\n\nRun it?`)) return;
+
     const out = node.querySelector('.output');
     out.textContent = `> ${command}\n…`;
     const res = await api(`/api/rcon/${target.id}`, {
@@ -141,6 +157,7 @@ function buildCard(target) {
     out.textContent = `> ${command}\n${res.ok ? (res.body || '(no output)') : `ERROR: ${res.error}`}`;
     out.scrollTop = out.scrollHeight;
     rconInput.value = '';
+    rconInput.dispatchEvent(new Event('input')); // clears the description hint
   };
   node.querySelector('.rcon-send').addEventListener('click', sendRcon);
   rconInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendRcon(); });
@@ -156,6 +173,94 @@ function buildCard(target) {
   cards.set(target.id, node);
   loadHistory(target.id, node);
   return node;
+}
+
+// --- console command picker -------------------------------------------------
+//
+// The console still takes any command the server understands — the dropdown is
+// a menu of the ones this game is known to have, so nobody has to keep a wiki
+// tab open to remember whether it's "listplayers" or "lp".
+
+// The literal words a command starts with, ignoring everything from the first
+// <placeholder> on: "ban add <name> 1 day" identifies as "ban add".
+function commandLead(command) {
+  const lead = [];
+  for (const word of command.toLowerCase().split(/\s+/)) {
+    if (word.includes('<')) break;
+    lead.push(word);
+  }
+  return lead;
+}
+
+// Which known command is the user typing? Longest match wins, so "ban add"
+// beats a bare "ban".
+function findCommand(commands, typed) {
+  if (!commands?.length || !typed?.trim()) return null;
+  const words = typed.trim().toLowerCase().split(/\s+/);
+  const hits = commands
+    .map((c) => ({ c, lead: commandLead(c.command) }))
+    .filter(({ lead }) => lead.length && lead.every((w, i) => words[i] === w))
+    .sort((a, b) => b.lead.length - a.lead.length);
+  return hits[0]?.c ?? null;
+}
+
+// Put the caret somewhere useful: on the first <placeholder> if there is one,
+// so typing overwrites it, otherwise at the end.
+function selectPlaceholder(input) {
+  const m = input.value.match(/<[^>]*>/);
+  if (m) input.setSelectionRange(m.index, m.index + m[0].length);
+  else input.setSelectionRange(input.value.length, input.value.length);
+}
+
+function wireCommandPicker(node, input, commands) {
+  if (!commands.length) return; // profile ships no list; plain text box as before
+
+  const select = node.querySelector('.rcon-pick');
+  const help = node.querySelector('.cmd-help');
+  node.querySelector('.rcon-pickrow').classList.remove('hidden');
+
+  const option = (c) => {
+    const el = document.createElement('option');
+    el.value = c.command;
+    el.textContent = `${c.danger ? '⚠ ' : ''}${c.command}${c.description ? ` — ${c.description}` : ''}`;
+    el.title = c.description || c.command;
+    return el;
+  };
+
+  const safe = commands.filter((c) => !c.danger);
+  const risky = commands.filter((c) => c.danger);
+  const group = (label, rows) => {
+    if (!rows.length) return;
+    const g = document.createElement('optgroup');
+    g.label = label;
+    rows.forEach((c) => g.append(option(c)));
+    select.append(g);
+  };
+  // Only split into groups when there is something to warn about.
+  if (risky.length) {
+    group('Commands', safe);
+    group('Careful — affects everyone', risky);
+  } else {
+    safe.forEach((c) => select.append(option(c)));
+  }
+
+  const showHelp = (entry) => {
+    help.classList.toggle('hidden', !entry?.description);
+    help.classList.toggle('danger', Boolean(entry?.danger));
+    help.textContent = entry?.description ? `${entry.danger ? '⚠ ' : ''}${entry.description}` : '';
+  };
+
+  select.addEventListener('change', () => {
+    const picked = commands.find((c) => c.command === select.value);
+    if (!picked) return;
+    input.value = picked.command;
+    showHelp(picked);
+    input.focus();
+    selectPlaceholder(input);
+    select.value = ''; // so picking the same command twice still fires
+  });
+
+  input.addEventListener('input', () => showHelp(findCommand(commands, input.value)));
 }
 
 async function runAction(target, node, btn) {
@@ -203,19 +308,69 @@ async function runAction(target, node, btn) {
   }
 }
 
+// A service card has no player list, which left it noticeably barer than a game
+// card. This fills that space with what a service actually has: which Windows
+// service it is, what gets polled, and what that poll last said.
+function renderServiceInfo(node, snap) {
+  const box = node.querySelector('.service-info');
+  const rows = [];
+
+  if (snap.serviceName) {
+    rows.push(['Service', snap.pid ? `${snap.serviceName} · pid ${snap.pid}` : snap.serviceName, '']);
+  }
+  if (snap.healthUrl) rows.push(['Polling', snap.healthUrl, '']);
+
+  if (snap.healthChecked !== false) {
+    if (snap.healthError) {
+      rows.push(['Error', snap.healthError, 'bad']);
+    } else if (snap.healthBody != null) {
+      // The endpoint answers with whatever it likes; JSON gets flattened to one
+      // line so a long reply doesn't push the rest of the card off screen.
+      const text = typeof snap.healthBody === 'string'
+        ? snap.healthBody
+        : JSON.stringify(snap.healthBody);
+      const trimmed = text.length > 200 ? `${text.slice(0, 200)}…` : text;
+      if (trimmed.trim()) rows.push([`Replied ${snap.httpStatus ?? ''}`.trim(), trimmed, '']);
+    }
+  }
+
+  box.classList.toggle('hidden', !rows.length);
+  box.querySelector('.infolist').innerHTML = rows
+    .map(([k, v, cls]) => `<li><span class="k">${escapeHtml(k)}</span><span class="v ${cls}">${escapeHtml(v)}</span></li>`)
+    .join('');
+}
+
+// GB reads well for a game server and badly for a 90 MB API process.
+function fmtMem(memMB) {
+  if (memMB == null) return '—';
+  return memMB >= 1024 ? `${(memMB / 1024).toFixed(1)} GB` : `${Math.round(memMB)} MB`;
+}
+
 function statTiles(snap) {
   if (snap.kind === 'service') {
-    return [
+    const tiles = [
       ['Service', snap.serviceStatus || '—', snap.serviceStatus === 'Running' ? 'good' : 'bad'],
-      ['Health', snap.healthy ? 'ok' : (snap.healthError || `HTTP ${snap.httpStatus}`), snap.healthy ? 'good' : 'bad'],
-      ['Latency', snap.responseMs != null ? `${snap.responseMs} ms` : '—', snap.responseMs > 1000 ? 'warn' : ''],
     ];
+    // A service with no healthUrl configured is judged on the service state
+    // alone; a Health tile reading "—" forever would just look broken.
+    if (snap.healthChecked !== false) {
+      tiles.push(
+        ['Health', snap.healthy ? 'ok' : (snap.healthError || `HTTP ${snap.httpStatus}`), snap.healthy ? 'good' : 'bad'],
+        ['Latency', snap.responseMs != null ? `${snap.responseMs} ms` : '—', snap.responseMs > 1000 ? 'warn' : ''],
+      );
+    }
+    tiles.push(
+      ['Uptime', fmtUptime(snap.startedAt), ''],
+      ['CPU', snap.cpu != null ? `${snap.cpu}%` : '—', snap.cpu > 80 ? 'warn' : ''],
+      ['RAM', fmtMem(snap.memMB), ''],
+    );
+    return tiles;
   }
   const tiles = [
     ['State', snap.up ? 'running' : 'stopped', snap.up ? 'good' : 'bad'],
     ['Uptime', fmtUptime(snap.startedAt), ''],
     ['CPU', snap.cpu != null ? `${snap.cpu}%` : '—', snap.cpu > 80 ? 'warn' : ''],
-    ['RAM', snap.memMB != null ? `${(snap.memMB / 1024).toFixed(1)} GB` : '—', ''],
+    ['RAM', fmtMem(snap.memMB), ''],
   ];
   // A game with no remote API has no RCON state worth a tile.
   if (snap.rcon !== 'n/a') {
@@ -258,6 +413,7 @@ function render(snap, pending) {
   const list = node.querySelector('.playerlist');
   if (snap.kind === 'service') {
     node.querySelector('.players-list').classList.add('hidden');
+    renderServiceInfo(node, snap);
   } else if (snap.rcon === 'n/a') {
     // handled by hiding the section at build time
   } else if (!players) {
@@ -433,7 +589,11 @@ async function loadHistory(id, node) {
   if (!rows.length) { legend.textContent = 'no history yet'; return; }
 
   const W = 300, H = 60;
-  const maxPlayers = Math.max(1, ...rows.map((r) => r.players ?? 0));
+  // Player count is the interesting series for a game. A service has none, so
+  // plot its response time instead — a flat line pinned at zero told you nothing.
+  const hasPlayers = rows.some((r) => r.players != null);
+  const value = hasPlayers ? (r) => r.players ?? 0 : (r) => r.ms ?? 0;
+  const peakValue = Math.max(1, ...rows.map(value));
   const x = (i) => (i / Math.max(1, rows.length - 1)) * W;
 
   // Red bands mark downtime, blue line is player count.
@@ -446,7 +606,7 @@ async function loadHistory(id, node) {
   if (bandStart !== null) downBands.push([bandStart, rows.length - 1]);
 
   const line = rows
-    .map((r, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${(H - ((r.players ?? 0) / maxPlayers) * (H - 8) - 4).toFixed(1)}`)
+    .map((r, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${(H - (value(r) / peakValue) * (H - 8) - 4).toFixed(1)}`)
     .join(' ');
 
   svg.innerHTML = `
@@ -454,12 +614,18 @@ async function loadHistory(id, node) {
     <path d="${line}" fill="none" stroke="#58a6ff" stroke-width="1.5" vector-effect="non-scaling-stroke"/>`;
 
   const downtime = rows.filter((r) => !r.up).length;
-  const hasPlayers = rows.some((r) => r.players != null);
-  const peak = Math.max(0, ...rows.map((r) => r.players ?? 0));
   const uptimePct = Math.round(((rows.length - downtime) / rows.length) * 100);
-  legend.textContent = hasPlayers
-    ? `peak ${peak} player(s) · ${uptimePct}% up · ${rows.length} samples`
-    : `${uptimePct}% up · ${rows.length} samples`;
+  const tail = `${uptimePct}% up · ${rows.length} samples`;
+
+  if (hasPlayers) {
+    legend.textContent = `peak ${Math.max(0, ...rows.map((r) => r.players ?? 0))} player(s) · ${tail}`;
+    return;
+  }
+
+  const latencies = rows.map((r) => r.ms).filter((ms) => ms != null);
+  legend.textContent = latencies.length
+    ? `${Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length)} ms avg · ${Math.max(...latencies)} ms peak · ${tail}`
+    : tail;
 }
 
 async function loadLog(id, node) {

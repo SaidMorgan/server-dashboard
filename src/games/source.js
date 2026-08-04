@@ -22,6 +22,19 @@ export default {
     shutdown: 'quit',
   },
 
+  // Deliberately limited to commands every Source game understands. A game with
+  // a richer vocabulary deserves its own profile — see the note above.
+  consoleCommands: [
+    { command: 'status', description: 'Server state and the connected players' },
+    { command: 'users', description: 'Connected players, names and IDs only' },
+    { command: 'stats', description: 'CPU, frame rate and network throughput' },
+    { command: 'version', description: 'Server build number' },
+    { command: 'say <message>', description: 'Server message in everyone\'s chat' },
+    { command: 'kick "<name>"', description: 'Disconnect one player; they can rejoin' },
+    { command: 'changelevel <map>', description: 'Switch maps — everyone reloads into the new one', danger: true },
+    { command: 'quit', description: 'Shut the server down — it will not come back on its own', danger: true },
+  ],
+
   // status output, one player per line:
   // # 2 "PlayerName" STEAM_1:0:1234 05:12 45 0 active 196608
   parsePlayers(body) {

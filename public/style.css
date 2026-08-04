@@ -108,6 +108,14 @@ body.solo .feed { max-width: 720px; margin: 0 auto; }
 .playerlist li .pid { color: var(--dim); font-size: 11px; }
 .playerlist .empty, .alerts .empty { color: var(--dim); font-family: inherit; font-style: italic; }
 
+/* Service targets: what a game card spends on players, a service spends here. */
+.infolist { list-style: none; margin: 0; padding: 0; font-family: var(--mono); font-size: 12px; }
+.infolist li { padding: 3px 0; display: flex; gap: 10px; }
+.infolist .k { color: var(--dim); flex: 0 0 82px; }
+/* A URL or JSON reply has nothing to wrap at, so let it break anywhere. */
+.infolist .v { min-width: 0; overflow-wrap: anywhere; }
+.infolist .v.bad { color: var(--bad); }
+
 .btnrow { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .btnrow:first-of-type { margin-top: 0; }
 .btn {
@@ -138,6 +146,20 @@ pre.output, pre.logout {
   max-height: 180px; overflow: auto; white-space: pre-wrap; word-break: break-word;
 }
 pre.logout { max-height: 260px; margin: 8px 0 0; }
+
+/* Console command picker. The select is full width because option text carries
+   the description, which is far longer than the command itself. */
+select.rcon-pick {
+  background: #0d1117; border: 1px solid var(--line); border-radius: 6px;
+  color: var(--text); padding: 6px 10px; font-family: var(--mono); font-size: 13px;
+  flex: 1; min-width: 0; cursor: pointer;
+}
+select.rcon-pick:focus { outline: none; border-color: var(--accent); }
+.cmd-help {
+  margin-top: 6px; font-size: 11px; color: var(--dim);
+  overflow-wrap: anywhere;
+}
+.cmd-help.danger { color: var(--warn); }
 details.logs summary {
   cursor: pointer; color: var(--dim); font-size: 11px;
   text-transform: uppercase; letter-spacing: .06em; font-weight: 600;

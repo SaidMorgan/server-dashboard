@@ -51,6 +51,17 @@ export default {
 
   verbAliases: { listplayers: 'showplayers', broadcast: 'announce' },
 
+  // One entry per restVerb above — there is no raw command string here, so the
+  // dropdown is the complete list of what this console accepts.
+  consoleCommands: [
+    { command: 'showplayers', description: 'Connected players with level and ping' },
+    { command: 'info', description: 'Server name, version and description' },
+    { command: 'metrics', description: 'Frame rate, player count, uptime and world object count' },
+    { command: 'save', description: 'Force a world save to disk' },
+    { command: 'announce <message>', description: 'Message in the chat panel — it fades, so players may miss it' },
+    { command: 'shutdown <seconds> <message>', description: 'On-screen countdown, then the server stops — it will not come back on its own', danger: true },
+  ],
+
   setupNotes: [
     'Set RESTAPIEnabled=True and RESTAPIPort=8212 in PalWorldSettings.ini. Auth is',
     'HTTP Basic as user "admin" with your AdminPassword. Broadcasts land in the',
