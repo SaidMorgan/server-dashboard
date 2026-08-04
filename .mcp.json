@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "codesight": {
+      "command": "node",
+      "args": [
+        "C:\\Users\\cheed\\AppData\\Roaming\\npm\\node_modules\\codesight\\dist\\index.js",
+        "--mcp"
+      ]
+    }
+  }
+}

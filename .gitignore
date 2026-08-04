@@ -37,3 +37,6 @@ npm-debug.log*
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# codesight generated context (regenerate with: codesight)
+.codesight/
