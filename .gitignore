@@ -26,6 +26,10 @@ backups/
 # Session signing key.
 *.secret
 
+# Per-machine git config and deploy tokens used by preRestartCommand. Holds a
+# credential file in plain text — it must never reach a published repo.
+deploy/
+
 node_modules/
 npm-debug.log*
 *.log

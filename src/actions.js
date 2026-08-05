@@ -2,7 +2,7 @@
 // player warnings, saves, broadcasts, raw RCON.
 import { rconCommand } from './rcon.js';
 import { getProfile } from './games/index.js';
-import { launchDetached, killProcess, controlService } from './win.js';
+import { launchDetached, killProcess, controlService, runCommands } from './win.js';
 
 // --- tunables ---------------------------------------------------------------
 // Sensible defaults for the servers this was built against. Change them here;
@@ -21,6 +21,10 @@ const SUPPRESS_SETTLE_MS = 10_000;   // after the server is confirmed down
 
 // Fallback for restart.graceSeconds in config.json.
 const DEFAULT_SHUTDOWN_GRACE_SECONDS = 90;
+
+// Fallback for a service target's preRestartTimeoutMinutes. A pull is seconds;
+// an npm install on a cold cache is not.
+const DEFAULT_PRE_RESTART_MINUTES = 5;
 
 const SAVE_FLUSH_MS = 3000;          // let a save reach disk before asking to exit
 const RESTART_GAP_MS = 5000;         // pause between the process dying and relaunch
@@ -210,6 +214,63 @@ export class Actions {
     const started = await this.start(id);
     this.monitor.addAlert('info', id, 'Restart complete', 'restart');
     return { ok: started.ok, forced: stopped.forced, error: started.error, backup: backup?.file ?? null };
+  }
+
+  // Restart, with the target's preRestartCommand run in between — a `git pull`,
+  // an install, a build. Separate from restartNow on purpose: a service that has
+  // simply wedged should be bounced on the code that is already there, without
+  // dragging in whatever landed upstream since.
+  //
+  // Stop first, then update, then start. Windows will not let git replace a file
+  // the running process holds open, so updating a live service is how you get a
+  // half-applied working tree.
+  async updateAndRestart(id) {
+    const t = this.target(id);
+    if (t.kind !== 'service') {
+      return { ok: false, error: 'update & restart only applies to service targets' };
+    }
+    if (!t.preRestartCommand) {
+      return { ok: false, error: 'no preRestartCommand configured for this target' };
+    }
+
+    const minutes = t.preRestartTimeoutMinutes ?? DEFAULT_PRE_RESTART_MINUTES;
+    const dir = t.preRestartDir || null;
+
+    this.monitor.suppress(id, true);
+    // The update sits inside the downtime, so the blackout has to cover it.
+    const unsuppress = () => {
+      setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_SERVICE_MS).unref?.();
+    };
+
+    // controlService confirms the service reached Stopped rather than taking the
+    // service manager's word for the request, which is what this path needs:
+    // the files must not be open when the update touches them.
+    const stopped = await controlService(t.serviceName, 'stop', t.nssm);
+    if (!stopped.ok) {
+      unsuppress();
+      this.monitor.addAlert('error', id, `Update aborted — the service did not stop: ${stopped.error}`);
+      return { ok: false, error: `stop failed: ${stopped.error}` };
+    }
+    this.monitor.addAlert('info', id, 'Stopped for update', 'restart');
+
+    const update = await runCommands(t.preRestartCommand, dir, minutes * 60_000);
+
+    if (!update.ok) {
+      // Bring it back on the code that was already there. A failed pull is a
+      // problem; a failed pull plus a service left down is an outage.
+      const restored = await controlService(t.serviceName, 'start', t.nssm);
+      unsuppress();
+      this.monitor.addAlert('error', id, restored.ok
+        ? `Update failed — restarted on the previous version: ${update.error}`
+        : `Update failed and the service did not come back: ${update.error}`);
+      return { ok: false, error: update.error, output: update.out, restored: restored.ok };
+    }
+
+    const started = await controlService(t.serviceName, 'start', t.nssm);
+    unsuppress();
+    if (started.ok) this.monitor.addAlert('info', id, 'Updated and restarted', 'restart');
+    else this.monitor.addAlert('error', id, `Update applied, but the service did not start: ${started.error}`);
+    return { ok: started.ok, error: started.error, output: update.out };
   }
 
   // Warn players at 15/10/5/1 minutes, then restart. Cancellable.

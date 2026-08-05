@@ -103,6 +103,7 @@ function buildCard(target) {
   }
   if (caps.canConsole === false) hide('.console');
   if (caps.canStart === false) hide('[data-act=start]');
+  if (!caps.canUpdate) hide('[data-act=updateRestart]');
   if (caps.hasBackup === false) hide('.backups');
   if (caps.hasLog === false) hide('.logs');
   if (caps.transport === 'none') hide('.players-list');
@@ -274,16 +275,28 @@ async function runAction(target, node, btn) {
   if (action === 'scheduleRestart') {
     body.minutes = Number(node.querySelector('.countdown-min').value) || 15;
   }
-  if (action === 'stop' || action === 'restart') {
-    const verb = action === 'stop' ? 'Stop' : 'Restart';
+  if (action === 'stop' || action === 'restart' || action === 'updateRestart') {
+    const verb = { stop: 'Stop', restart: 'Restart', updateRestart: 'Update and restart' }[action];
     const count = node.dataset.playerCount || '0';
     const warning = count !== '0' ? `\n\n${count} player(s) are ONLINE right now.` : '';
-    if (!confirm(`${verb} ${target.name}?${warning}`)) return;
+    // Worth spelling out: this one changes what is on disk, not just the uptime.
+    const extra = action === 'updateRestart'
+      ? '\n\nThis stops the service, runs its update command, then starts it again.'
+      : '';
+    if (!confirm(`${verb} ${target.name}?${extra}${warning}`)) return;
   }
 
   btn.classList.add('busy');
   const out = node.querySelector('.output');
   if (out) out.textContent = `${action}…`;
+
+  // The update transcript is the whole point of the button, so it gets its own
+  // panel that stays put once the action finishes.
+  const updateOut = action === 'updateRestart' ? node.querySelector('.update-out') : null;
+  if (updateOut) {
+    updateOut.classList.remove('hidden');
+    updateOut.textContent = 'Stopping, updating, restarting…';
+  }
   try {
     const res = await api(`/api/action/${target.id}`, { method: 'POST', body: JSON.stringify(body) });
     if (out) {
@@ -298,8 +311,16 @@ async function runAction(target, node, btn) {
       out.textContent = res.ok
         ? `${action}: ok${res.forced ? ' (force-killed)' : ''}${detail}`
         : `${action} failed: ${res.error}`;
-    } else if (!res.ok) {
+    } else if (!res.ok && !updateOut) {
       alert(`${action} failed: ${res.error}`);
+    }
+    if (updateOut) {
+      const head = res.ok
+        ? 'Updated and restarted.'
+        : `FAILED: ${res.error}${res.restored === true ? '\nService was restarted on the previous version.'
+          : res.restored === false ? '\nThe service is still DOWN.' : ''}`;
+      updateOut.textContent = [head, res.output].filter(Boolean).join('\n\n');
+      updateOut.scrollTop = updateOut.scrollHeight;
     }
     if (action === 'broadcast') node.querySelector('.broadcast-msg').value = '';
   } finally {

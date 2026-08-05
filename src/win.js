@@ -132,6 +132,33 @@ export async function getServiceState(serviceName) {
   return res.ok ? res.out : 'Unknown';
 }
 
+const SERVICE_SETTLE_MS = 30_000;    // how long a service gets to reach a state
+const SERVICE_POLL_MS = 1000;
+
+// Windows reports a stop the moment it is accepted, not when the process is
+// gone, so poll until the state settles. "NotInstalled" is final — waiting for
+// a service that doesn't exist to stop would just burn the whole timeout.
+export async function waitForServiceState(serviceName, want, timeoutMs = SERVICE_SETTLE_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let state = await getServiceState(serviceName);
+  while (state !== want && state !== 'NotInstalled' && Date.now() < deadline) {
+    await delay(SERVICE_POLL_MS);
+    state = await getServiceState(serviceName);
+  }
+  return { ok: state === want, state };
+}
+
+// Just the PID, without getServiceProcess's walk of the whole process table.
+async function getServicePid(serviceName) {
+  const res = await ps(
+    `(Get-CimInstance Win32_Service -Filter "Name='${serviceName}'" -ErrorAction SilentlyContinue).ProcessId`,
+  );
+  const pid = Number(res.out);
+  return res.ok && Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
 // Get-Service knows whether a service runs, but not which process is doing the
 // running — Win32_Service carries the PID, and from a PID the ordinary counters
 // follow. That is what lets a service card show uptime, CPU and RAM instead of
@@ -206,28 +233,141 @@ export async function getServiceProcess(serviceName) {
   }
 }
 
+// Neither backend volunteers a failure. A PowerShell cmdlet error is
+// non-terminating, so `Stop-Service` on a service that isn't there writes to the
+// error stream and carries on; nssm reports itself only in its exit code. Both
+// therefore need asking twice: make the failure terminating, then confirm the
+// service actually reached the state somebody pressed the button for.
+const SERVICE_GOAL = { start: 'Running', stop: 'Stopped', restart: 'Running' };
+
+// A command that reported failure gets only a moment to prove otherwise. The
+// benign case — nssm objecting that an already-stopped service is stopped — is
+// true the instant we look, and a real error shouldn't sit on the button for
+// half a minute first.
+const SERVICE_ERROR_GRACE_MS = 5000;
+
 export async function controlService(serviceName, action, nssmPath) {
   const verb = { start: 'start', stop: 'stop', restart: 'restart' }[action];
   if (!verb) return { ok: false, error: `unknown service action: ${action}` };
 
   // Prefer NSSM (it knows how to restart the wrapped node process cleanly).
+  // -Force means "stop the dependent services too" and only Stop/Restart-Service
+  // take it; handing it to Start-Service fails the call outright.
   const cmd = nssmPath
-    ? `& '${nssmPath}' ${verb} ${serviceName}`
+    // nssm says what went wrong on stderr, which arrives as ErrorRecords whose
+    // own ToString() is the useless type name — take the message off each one.
+    ? `$out = & '${nssmPath}' ${verb} ${serviceName} 2>&1 |
+         ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ } } |
+         Where-Object { $_ -match '\\S' }
+       if ($LASTEXITCODE -ne 0) { throw "nssm ${verb} exited $LASTEXITCODE : $($out -join ' ')" }`
     : verb === 'restart'
-      ? `Restart-Service -Name '${serviceName}' -Force`
-      : `${verb === 'start' ? 'Start-Service' : 'Stop-Service'} -Name '${serviceName}' -Force`;
+      ? `Restart-Service -Name '${serviceName}' -Force -ErrorAction Stop`
+      : verb === 'start'
+        ? `Start-Service -Name '${serviceName}' -ErrorAction Stop`
+        : `Stop-Service -Name '${serviceName}' -Force -ErrorAction Stop`;
 
-  const res = await ps(`${cmd}; $?`, 45000);
-  if (!res.ok) {
-    const denied = /access is denied|requires elevation/i.test(res.error || '');
+  // A restart that failed on a service which was already running ends in the
+  // same state as one that worked, so the state alone can't tell them apart —
+  // remember which process we started with.
+  const pidBefore = verb === 'restart' ? await getServicePid(serviceName) : null;
+
+  const res = await ps(cmd, 45000);
+  const goal = SERVICE_GOAL[action];
+  const settled = await waitForServiceState(
+    serviceName,
+    goal,
+    res.ok ? undefined : SERVICE_ERROR_GRACE_MS,
+  );
+
+  if (settled.ok) {
+    // The service is where it was asked to be. If the command complained on the
+    // way there it was complaining about a no-op, which is not a failure — with
+    // the exception of a restart, where "already Running" is exactly what a
+    // restart that never happened looks like.
+    if (res.ok || verb !== 'restart') return { ok: true, out: res.out };
+    const pidAfter = await getServicePid(serviceName);
+    if (pidAfter && pidAfter !== pidBefore) return { ok: true, out: res.out };
+  }
+
+  if (/access is denied|requires elevation/i.test(res.error || '')) {
     return {
       ok: false,
-      error: denied
-        ? 'Access denied — start the dashboard as administrator to control this service'
-        : res.error,
+      error: 'Access denied — start the dashboard as administrator to control this service',
     };
   }
-  return { ok: true, out: res.out };
+  // nssm writes UTF-16, which arrives here padded with NULs.
+  if (!res.ok) return { ok: false, error: String(res.error).replace(/\0/g, '').trim() };
+
+  return {
+    ok: false,
+    error: settled.state === 'NotInstalled'
+      ? `there is no service called ${serviceName}`
+      : `the service is ${settled.state}, not ${goal}`,
+  };
+}
+
+// Runs a target's preRestartCommand list — a `git pull`, an `npm ci`, a build —
+// and reports what it printed. Unlike launchDetached this waits, because the
+// whole point is to know whether the update worked before the service comes
+// back up.
+//
+// Each command is a separate PowerShell run and the first failure stops the
+// list: Windows PowerShell 5.1 has no `&&`, so chaining with `;` would happily
+// build on top of a pull that never happened.
+const EXIT_MARKER = '__SD_EXIT__';
+
+export async function runCommands(commands, cwd, timeout = 300000) {
+  const list = (Array.isArray(commands) ? commands : [commands]).filter(Boolean);
+  if (!list.length) return { ok: false, error: 'no command to run', out: '' };
+  if (cwd && !fs.existsSync(winPath(cwd))) {
+    return { ok: false, error: `working folder not found: ${winPath(cwd)}`, out: '' };
+  }
+
+  const transcript = [];
+  for (const command of list) {
+    // Native tools report failure through an exit code rather than by throwing,
+    // and plenty of them (git especially) write ordinary progress to stderr — so
+    // merge the streams for the log and judge success on the exit code.
+    //
+    // The code comes back as a trailing marker line rather than as a thrown
+    // error, because a failed update is exactly when its output matters most and
+    // ps() keeps only the exception text.
+    const script = [
+      cwd ? `Set-Location -LiteralPath '${winPath(cwd).replace(/'/g, "''")}' -ErrorAction Stop` : '',
+      '$ErrorActionPreference = "Continue"',
+      '$global:LASTEXITCODE = 0',
+      // Rendering an ErrorRecord whole wraps every stderr line in "At line:N
+      // char:M", a caret underline and a FullyQualifiedErrorId — four lines of
+      // PowerShell trivia around one line of git. Take the message only.
+      `$out = & { ${command} } 2>&1 | ForEach-Object {`,
+      '  if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { $_ }',
+      '} | Out-String -Width 200',
+      '$ok = $?',
+      '$code = $LASTEXITCODE',
+      // A cmdlet that failed without setting an exit code still failed.
+      'if ($code -eq 0 -and -not $ok) { $code = 1 }',
+      'Write-Output $out',
+      `Write-Output "${EXIT_MARKER}$code"`,
+    ].filter(Boolean).join('\n');
+
+    transcript.push(`> ${command}`);
+    const res = await ps(script, timeout);
+
+    const marker = String(res.out || '').lastIndexOf(EXIT_MARKER);
+    const body = marker === -1 ? String(res.out || '') : res.out.slice(0, marker);
+    const code = marker === -1 ? null : Number(res.out.slice(marker + EXIT_MARKER.length).trim());
+    if (body.trim()) transcript.push(body.trim());
+
+    if (!res.ok || code === null || code !== 0) {
+      const why = res.ok ? `exit code ${code ?? 'unknown'}` : res.error;
+      return {
+        ok: false,
+        error: `${command} — ${why}`,
+        out: transcript.join('\n').trim(),
+      };
+    }
+  }
+  return { ok: true, out: transcript.join('\n').trim() };
 }
 
 export function launchDetached(batPath) {

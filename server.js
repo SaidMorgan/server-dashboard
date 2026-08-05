@@ -79,6 +79,7 @@ const publicTarget = (t) => {
     canConsole: Boolean(profile && profile.transport !== 'none'),
     consoleCommands: profile?.consoleCommands ?? [],
     canStart: Boolean(t.startCommand) || t.kind === 'service',
+    canUpdate: t.kind === 'service' && Boolean(t.preRestartCommand),
     gamePort: t.gamePort ?? null, rconPort: t.rconPort ?? null,
     maxPlayers: t.maxPlayers ?? null, serviceName: t.serviceName ?? null,
     healthUrl: t.healthUrl ?? null, hasLog: Boolean(t.logFile || t.logDir),
@@ -280,6 +281,7 @@ app.post('/api/action/:id', async (req, res) => {
       case 'start':          return res.json(await actions.start(id));
       case 'stop':           return res.json(await actions.stop(id));
       case 'restart':        return res.json(await actions.restartNow(id));
+      case 'updateRestart':  return res.json(await actions.updateAndRestart(id));
       case 'save':           return res.json(await actions.save(id));
       case 'broadcast':      return res.json(await actions.broadcast(id, String(message || '').trim()));
       case 'scheduleRestart':return res.json(actions.scheduleRestart(id, Number(minutes) || 15, reason || 'scheduled restart'));

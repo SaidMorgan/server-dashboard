@@ -179,7 +179,17 @@
       "serviceName": "MyApiService",
       "healthUrl": "http://127.0.0.1:3001/health",
       "nssm": "C:\\Apps\\nssm\\nssm.exe",
-      "logDir": "C:\\Apps\\MyApi\\logs"
+      "logDir": "C:\\Apps\\MyApi\\logs",
+
+      // Optional. Adds an "Update & restart" button beside "Restart now":
+      // the service is stopped, these run in order, then it starts again.
+      // Omit it and only the plain restart is offered.
+      "preRestartCommand": [
+        "git pull --ff-only",
+        "npm ci --omit=dev"
+      ],
+      "preRestartDir": "C:\\Apps\\MyApi",
+      "preRestartTimeoutMinutes": 5
     }
   ]
 }

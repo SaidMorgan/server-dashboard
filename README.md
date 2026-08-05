@@ -229,6 +229,45 @@ interruption.
 }
 ```
 
+#### Update & restart
+
+**Restart now** stops the service and starts it again on the code that is
+already on disk. Nothing is fetched, nothing is built — it is the button for a
+process that has wedged.
+
+Give a service a `preRestartCommand` and it gets a second button, **Update &
+restart**, which stops the service, runs that command, then starts it:
+
+```jsonc
+{
+  "id": "my-api",
+  "name": "My API",
+  "kind": "service",
+  "serviceName": "MyApiService",
+
+  "preRestartCommand": [           // one string, or a list run in order
+    "git pull --ff-only",
+    "npm ci --omit=dev"
+  ],
+  "preRestartDir": "C:\\Apps\\MyApi",  // where to run it; defaults to the dashboard folder
+  "preRestartTimeoutMinutes": 5        // per command, default 5
+}
+```
+
+The order matters: the service is stopped *before* the update runs, because
+Windows will not let `git` replace a file the running process still holds open.
+
+Each command is a separate PowerShell run and the first non-zero exit code stops
+the list — Windows PowerShell has no `&&`, so a `;`-chained pull that failed
+would otherwise be followed by a build of the old tree. If the update fails, the
+service is started again on the previous version rather than left down, and the
+alert says so. The full transcript — everything the commands printed, stdout and
+stderr both — appears under the buttons.
+
+This runs whatever you put in it, as whatever account the dashboard runs under.
+It is the same trust level as `startCommand`, and one more reason the dashboard
+refuses to listen off-localhost without a password.
+
 ---
 
 ## Access

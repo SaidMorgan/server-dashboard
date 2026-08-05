@@ -303,6 +303,34 @@ function validateNotificationChannel(channel, where, errors) {
   }
 }
 
+// The optional update step behind a service card's "Update & restart" button:
+// one command or a list of them, run between the stop and the start.
+function validatePreRestart(t, at, errors) {
+  if (t.preRestartCommand === undefined) {
+    for (const key of ['preRestartDir', 'preRestartTimeoutMinutes']) {
+      if (t[key] !== undefined) {
+        errors.push(`${at}.${key}: set without preRestartCommand, so nothing would ever use it`);
+      }
+    }
+    return;
+  }
+
+  const list = Array.isArray(t.preRestartCommand) ? t.preRestartCommand : [t.preRestartCommand];
+  if (!list.length || !list.every(isStr)) {
+    errors.push(
+      `${at}.preRestartCommand: expected a command such as "git pull --ff-only", ` +
+      `or an array of them to run in order`,
+    );
+  }
+  if (t.preRestartDir !== undefined && !isStr(t.preRestartDir)) {
+    errors.push(`${at}.preRestartDir: expected the folder to run the command in, e.g. "C:\\\\Apps\\\\MyApi"`);
+  }
+  if (t.preRestartTimeoutMinutes !== undefined
+    && !(isNum(t.preRestartTimeoutMinutes) && t.preRestartTimeoutMinutes > 0)) {
+    errors.push(`${at}.preRestartTimeoutMinutes: expected a positive number of minutes`);
+  }
+}
+
 function validateTarget(t, i, seen, errors) {
   const where = `targets[${i}]`;
 
@@ -321,6 +349,7 @@ function validateTarget(t, i, seen, errors) {
     if (t.healthUrl && !/^https?:\/\//i.test(t.healthUrl)) {
       errors.push(`${at}.healthUrl: must start with http:// or https://`);
     }
+    validatePreRestart(t, at, errors);
     return;
   }
 

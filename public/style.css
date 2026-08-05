@@ -139,13 +139,16 @@ input[type=text], input[type=number] {
 input[type=number] { flex: 0 0 70px; }
 input:focus { outline: none; border-color: var(--accent); }
 
-pre.output, pre.logout {
+pre.output, pre.logout, pre.update-out {
   background: #0d1117; border: 1px solid var(--line); border-radius: 6px;
   padding: 8px 10px; margin: 0 0 8px;
   font-family: var(--mono); font-size: 12px; color: var(--dim);
   max-height: 180px; overflow: auto; white-space: pre-wrap; word-break: break-word;
 }
 pre.logout { max-height: 260px; margin: 8px 0 0; }
+/* The update transcript lives in Controls, not the console, so a service card
+   (which has no console) can still show what the pull actually did. */
+pre.update-out { max-height: 220px; margin: 8px 0 0; }
 
 /* Console command picker. The select is full width because option text carries
    the description, which is far longer than the command itself. */
