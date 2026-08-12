@@ -218,33 +218,46 @@ export class Scheduler {
     if (userJob) { userJob.lastRun = Date.now(); this.#save(); }
 
     try {
-      switch (action) {
-        case 'backup':
-          return await this.backups.run(targetId, { reason: 'scheduled' });
-        case 'save':
-          return await this.actions.save(targetId);
-        case 'broadcast':
-          return await this.actions.broadcast(targetId, job.message);
-        case 'start':
-          return await this.actions.start(targetId);
-        case 'stop':
-        case 'restart': {
-          // Warn players first when asked. scheduleRestart already handles the
-          // 15/10/5/1 minute countdown and is cancellable from the UI.
-          if (job.warnMinutes > 0 && action === 'restart') {
-            return this.actions.scheduleRestart(targetId, job.warnMinutes, job.reason);
-          }
-          this.monitor.addAlert('info', targetId, `Scheduled ${action} starting now — ${job.reason}`, 'restart');
-          return action === 'stop'
-            ? await this.actions.stop(targetId)
-            : await this.actions.restartNow(targetId);
-        }
-        default:
-          return { ok: false, error: `unknown action: ${action}` };
+      const result = await this.#perform(job);
+      // A job that reports a failure is as failed as one that throws, and most
+      // of them report. Without this, a nightly restart that stopped the server
+      // and couldn't bring it back said nothing at all — the only trace was an
+      // info line in the feed nobody reads at 3am.
+      if (result && result.ok === false) {
+        this.monitor.addAlert('error', targetId, `Scheduled ${action} failed: ${result.error}`);
       }
+      return result;
     } catch (err) {
       this.monitor.addAlert('error', targetId, `Scheduled ${action} failed: ${err.message}`);
       return { ok: false, error: err.message };
+    }
+  }
+
+  async #perform(job) {
+    const { targetId, action } = job;
+    switch (action) {
+      case 'backup':
+        return await this.backups.run(targetId, { reason: 'scheduled' });
+      case 'save':
+        return await this.actions.save(targetId);
+      case 'broadcast':
+        return await this.actions.broadcast(targetId, job.message);
+      case 'start':
+        return await this.actions.start(targetId);
+      case 'stop':
+      case 'restart': {
+        // Warn players first when asked. scheduleRestart already handles the
+        // 15/10/5/1 minute countdown and is cancellable from the UI.
+        if (job.warnMinutes > 0 && action === 'restart') {
+          return this.actions.scheduleRestart(targetId, job.warnMinutes, job.reason);
+        }
+        this.monitor.addAlert('info', targetId, `Scheduled ${action} starting now — ${job.reason}`, 'restart');
+        return action === 'stop'
+          ? await this.actions.stop(targetId)
+          : await this.actions.restartNow(targetId);
+      }
+      default:
+        return { ok: false, error: `unknown action: ${action}` };
     }
   }
 

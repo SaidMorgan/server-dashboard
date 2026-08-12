@@ -15,6 +15,10 @@ export default {
     gamePort: 7777,
     queryPort: 27015,
     rconPort: 27020,
+    // "ARK: Survival Ascended Dedicated Server" on Steam. Lets the dashboard read
+    // the installed build out of Steam's manifest and compare it with the
+    // published one — see src/steam.js.
+    steamAppId: 2430930,
     // ARK refuses RCON for its entire ~4 minute load and burns a socket slot on
     // every rejected attempt. Don't probe until it has plausibly finished.
     readyAfterSeconds: 240,

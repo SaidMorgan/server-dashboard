@@ -15,6 +15,8 @@ export default {
   defaults: {
     gamePort: 8211,
     restPort: 8212,
+    // "Palworld Dedicated Server" on Steam — see src/steam.js.
+    steamAppId: 2394010,
     // Palworld renders this as an on-screen countdown — the only server message
     // players can't miss, since announce only reaches the chat panel.
     shutdownCountdownSeconds: 60,

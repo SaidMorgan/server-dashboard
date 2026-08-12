@@ -16,6 +16,8 @@ export default {
   defaults: {
     gamePort: 2456,
     queryPort: 2457,
+    // "Valheim Dedicated Server" on Steam — see src/steam.js.
+    steamAppId: 896660,
   },
 
   setupNotes: [

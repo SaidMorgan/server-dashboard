@@ -104,6 +104,7 @@ function buildCard(target) {
   if (caps.canConsole === false) hide('.console');
   if (caps.canStart === false) hide('[data-act=start]');
   if (!caps.canUpdate) hide('[data-act=updateRestart]');
+  if (!caps.canSteamUpdate) hide('[data-act=steamUpdate]');
   if (caps.hasBackup === false) hide('.backups');
   if (caps.hasLog === false) hide('.logs');
   if (caps.transport === 'none') hide('.players-list');
@@ -275,6 +276,23 @@ async function runAction(target, node, btn) {
   if (action === 'scheduleRestart') {
     body.minutes = Number(node.querySelector('.countdown-min').value) || 15;
   }
+  // The Steam check only stops the server if there is actually something to
+  // install, so the confirmation has to describe a maybe rather than a certainty.
+  if (action === 'steamUpdate') {
+    const count = node.dataset.playerCount || '0';
+    const warning = count !== '0' ? `\n\n${count} player(s) are ONLINE right now.` : '';
+    if (!confirm(
+      `Check Steam for a newer build of ${target.name}?\n\n`
+      + `If there is one, the server will be STOPPED so you can install it in Steam. `
+      + `The dashboard starts it again by itself once Steam has finished.\n\n`
+      + `If it is already up to date, nothing happens.${warning}`,
+    )) return;
+  }
+
+  if (action === 'steamCancel' && !confirm(
+    `Stop waiting for the Steam update and start ${target.name} on the build it already has?`,
+  )) return;
+
   if (action === 'stop' || action === 'restart' || action === 'updateRestart') {
     const verb = { stop: 'Stop', restart: 'Restart', updateRestart: 'Update and restart' }[action];
     const count = node.dataset.playerCount || '0';
@@ -290,6 +308,22 @@ async function runAction(target, node, btn) {
   const out = node.querySelector('.output');
   if (out) out.textContent = `${action}…`;
 
+  // A game server is asked to save and exit, and a large world can take a minute
+  // or more to do it. A line that says "stop…" and then sits there for ninety
+  // seconds is indistinguishable from a button that did nothing, so count.
+  const slow = { stop: 'stopping', restart: 'restarting', updateRestart: 'updating', steamUpdate: 'checking Steam' }[action];
+  let ticker = null;
+  if (out && slow) {
+    const startedAt = Date.now();
+    const tick = () => {
+      const secs = Math.round((Date.now() - startedAt) / 1000);
+      out.textContent = `${slow}… ${secs}s`
+        + (action === 'stop' || action === 'restart' ? ' — waiting for it to save and exit' : '');
+    };
+    tick();
+    ticker = setInterval(tick, 1000);
+  }
+
   // The update transcript is the whole point of the button, so it gets its own
   // panel that stays put once the action finishes.
   const updateOut = action === 'updateRestart' ? node.querySelector('.update-out') : null;
@@ -299,7 +333,12 @@ async function runAction(target, node, btn) {
   }
   try {
     const res = await api(`/api/action/${target.id}`, { method: 'POST', body: JSON.stringify(body) });
-    if (out) {
+    if (action === 'steamUpdate' || action === 'steamCancel') {
+      // From here the banner is the whole story and the status stream keeps it
+      // current — except for "already up to date", which leaves no state behind
+      // it and would otherwise look like a button that did nothing.
+      showUpdateAnswer(node, res, action);
+    } else if (out) {
       // Say who actually received a broadcast — "ok" against an empty server
       // looks identical to a broadcast that silently went nowhere.
       let detail = '';
@@ -308,8 +347,9 @@ async function runAction(target, node, btn) {
         detail = seen ? ` — delivered to ${seen} player(s)` : ' — but nobody is online to see it';
       }
       if (res.backup) detail += ` — backed up as ${res.backup}`;
+      const took = res.seconds != null ? ` in ${res.seconds}s` : '';
       out.textContent = res.ok
-        ? `${action}: ok${res.forced ? ' (force-killed)' : ''}${detail}`
+        ? `${action}: ok${took}${res.forced ? ' (it had to be force-killed)' : ''}${detail}`
         : `${action} failed: ${res.error}`;
     } else if (!res.ok && !updateOut) {
       alert(`${action} failed: ${res.error}`);
@@ -324,8 +364,78 @@ async function runAction(target, node, btn) {
     }
     if (action === 'broadcast') node.querySelector('.broadcast-msg').value = '';
   } finally {
+    clearInterval(ticker);
     btn.classList.remove('busy');
     refresh();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Steam updates
+// ---------------------------------------------------------------------------
+
+// The reply to pressing the button. Everything that follows — the wait, the
+// download, the restart — arrives through renderUpdate on the status stream.
+function showUpdateAnswer(node, res, action) {
+  const box = node.querySelector('.update-banner');
+  const text = node.querySelector('.update-text');
+  box.classList.remove('hidden');
+  box.classList.toggle('bad', !res.ok);
+
+  if (!res.ok) {
+    text.textContent = `${action === 'steamCancel' ? 'Could not start it' : 'Steam check failed'} — ${res.error}`;
+  } else if (action === 'steamCancel') {
+    text.textContent = 'No longer waiting — starting the server…';
+  } else if (res.updateAvailable === false) {
+    text.textContent = `Already on the current build (${res.installed}). Nothing to do.`;
+  } else {
+    text.textContent = 'Update found — stopping the server…';
+  }
+}
+
+// One line under the card header saying where this target stands: a new build is
+// out, or the server is stopped waiting for you to install one.
+function renderUpdate(node, u) {
+  const box = node.querySelector('.update-banner');
+  const text = node.querySelector('.update-text');
+  const cancel = node.querySelector('.update-cancel');
+  if (!box) return;
+
+  // No entry means idle and current. Don't clear a just-clicked answer that the
+  // server has no state for ("already up to date").
+  if (!u) {
+    cancel.classList.add('hidden');
+    box.classList.remove('waiting');
+    return;
+  }
+
+  box.classList.remove('hidden');
+  box.classList.toggle('waiting', u.phase === 'waiting');
+  box.classList.toggle('bad', Boolean(u.error) && u.phase === 'idle');
+  cancel.classList.toggle('hidden', u.phase !== 'waiting');
+
+  const inProgress = { checking: 'Asking Steam which build is current…',
+    stopping: 'Update found — stopping the server…',
+    starting: 'Starting the server…' }[u.phase];
+
+  if (u.phase === 'waiting') {
+    // Steam counts the bytes down in the manifest, so the card can show progress
+    // for a download nobody in this process started.
+    const progress = u.bytesToDownload
+      ? ` Downloading ${fmtBytes(u.bytesDownloaded)} of ${fmtBytes(u.bytesToDownload)}.`
+      : '';
+    text.textContent = `⬇ Stopped for a Steam update — install build ${u.latest} in Steam now `
+      + `(this one is ${u.installed}).${progress} The server starts itself when Steam finishes; `
+      + `giving up ${fmtUntil(u.deadline)}.`;
+  } else if (inProgress) {
+    text.textContent = inProgress;
+  } else if (u.error) {
+    text.textContent = `Steam check failed — ${u.error}`;
+  } else if (u.updateAvailable) {
+    text.textContent = `⬆ Steam has build ${u.latest}; this server is running ${u.installed}. `
+      + `Press "Check for update" when you want it installed.`;
+  } else {
+    box.classList.add('hidden');
   }
 }
 
@@ -402,7 +512,7 @@ function statTiles(snap) {
   return tiles;
 }
 
-function render(snap, pending) {
+function render(snap, pending, updates) {
   const node = cards.get(snap.id);
   if (!node) return;
 
@@ -457,9 +567,14 @@ function render(snap, pending) {
     cd.classList.add('hidden');
   }
 
+  const update = updates?.[snap.id];
+  renderUpdate(node, update);
+
   const startBtn = node.querySelector('[data-act=start]');
   const stopBtn = node.querySelector('[data-act=stop]');
-  if (startBtn) startBtn.disabled = snap.up;
+  // Starting it by hand mid-wait would put the files back under a running server
+  // and leave Steam unable to patch them. The banner's own button is the way out.
+  if (startBtn) startBtn.disabled = snap.up || update?.phase === 'waiting';
   if (stopBtn) stopBtn.disabled = !snap.up;
 }
 
@@ -720,7 +835,7 @@ function applyStatus(status) {
   for (const snap of status.targets) {
     if (ONLY && snap.id !== ONLY) continue;
     if (!cards.has(snap.id)) buildCard(snap);
-    render(snap, status.pending);
+    render(snap, status.pending, status.updates);
   }
 
   const allUp = status.targets.filter((t) => !ONLY || t.id === ONLY).every((t) => t.up);

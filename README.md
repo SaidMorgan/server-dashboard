@@ -110,6 +110,47 @@ Most ports have sensible per-game defaults, so you can usually omit them. Omit
 > Windows paths in JSON need doubled backslashes (`C:\\Servers\\...`). Forward
 > slashes (`C:/Servers/...`) also work.
 
+### Steam updates
+
+Game targets installed through Steam get a **Check for update** button and a
+six-hourly background check. The dashboard reads the installed build id out of
+Steam's own `appmanifest_<appid>.acf` and compares it with the build Steam is
+publishing for that app.
+
+It never downloads anything. These servers are installed by the Steam *client*,
+and pointing SteamCMD at the client's library leaves two programs each keeping
+their own record of what is installed. So the update is half automatic:
+
+1. You press **Check for update** (or the background check tells you there's a
+   new build). If you're already current, it says so and nothing else happens.
+2. If there is one, the server is warned, saved, backed up if `beforeRestart` is
+   set, and **stopped** — Steam cannot patch files a running server holds open.
+3. You install the update in the Steam client.
+4. The dashboard is watching the manifest. When the build id changes and there
+   are no bytes left to download, it starts the server again on its own.
+
+While it waits, the card shows a banner with the download progress Steam is
+writing to disk, crash alerts and the watchdog are held off, and Start is
+disabled — the banner's own button is how you bail out and start the server on
+the build it already has. If nothing is installed within `steam.waitMinutes`
+(default 60) it does that for you rather than leaving the server down overnight.
+A wait survives a dashboard restart.
+
+Most games fill in their app id from their profile (ARK, Palworld, 7 Days to
+Die, Valheim). For anything else, give the target the app id of the **dedicated
+server**, not the game:
+
+```jsonc
+"steamAppId": 2394010,
+"steamLibrary": "D:\\SteamLibrary\\steamapps"   // only if it isn't auto-found
+```
+
+Other libraries are discovered from `libraryfolders.vdf`, so a server moved to
+another drive still resolves. If no manifest is found the button is hidden
+rather than shown broken. Everything this feature raises is tagged with the
+`update` alert category, so one entry in a channel's `mute` list keeps it out of
+chat while the activity feed still shows all of it.
+
 ### Watchdog — restart it when it crashes
 
 ```jsonc
@@ -180,7 +221,7 @@ startup. Waking up to a queue of missed 3am restarts is worse than missing them.
     "enabled": true,
     "url": "${DISCORD_WEBHOOK_URL}",
     "events": ["error", "warn"],
-    "mute": ["backup", "restart"],  // categories this channel skips
+    "mute": ["backup", "restart", "update"],  // categories this channel skips
     "always": ["recovery"]          // categories it takes at any level
   }
 }
@@ -192,12 +233,13 @@ minute, so a flapping server can't flood your channel.
 
 `events` picks the levels a channel wants. `mute` and `always` then adjust that
 by category — how loud an alert is and what kind of thing it is are different
-questions, and a channel usually wants to filter on both. The three categories:
+questions, and a channel usually wants to filter on both. The four categories:
 
 | Category | Covers | Default |
 | --- | --- | --- |
 | `backup` | Archive successes and failures | muted |
 | `restart` | Planned stop/start chatter, scheduled or clicked | muted |
+| `update` | Steam build checks and everything the Update button does | muted |
 | `recovery` | A target back up after an unplanned outage | always |
 
 `mute` drops a category however loud it is, which is what keeps a nightly reset
@@ -207,6 +249,12 @@ sits below the level threshold: "Back online" is only an `info`, but it's the
 all-clear to a crash you were paged about, so it goes out. It's only ever
 reached after an unplanned outage — a managed restart is suppressed and never
 raises it.
+
+A restart that fails is deliberately none of those categories, so it reaches
+every channel whatever they mute: a scheduled job that reports failure, and a
+restart that stopped a server and could not start it again, both raise a plain
+`error`. The quiet nightly restart you want to ignore and the one that left a
+server down at 3am should not look the same.
 
 The defaults above leave a channel that carries real problems and nothing else:
 crashes, failed schedules, RCON dropping out, a failing health check, and the
@@ -225,9 +273,16 @@ interruption.
   "serviceName": "MyApiService",
   "healthUrl": "http://127.0.0.1:3001/health",
   "nssm": "C:\\Apps\\nssm\\nssm.exe",   // optional, preferred for restarts
-  "logDir": "C:\\Apps\\MyApi\\logs"     // newest file is tailed
+  "logDir": "C:\\Apps\\MyApi\\logs",    // newest file is tailed
+  "readyAfterSeconds": 150              // how long it takes to answer healthUrl
 }
 ```
+
+`readyAfterSeconds` matters more than it looks. A service counts as up only once
+its health check passes, so a restart of something that takes a minute to warm
+up finishes *after* the default blackout ends — and the dashboard then reports
+the tail of its own restart as an unplanned outage that recovered, every night
+at the same minute. Set this to comfortably more than the warm-up and that stops.
 
 #### Update & restart
 

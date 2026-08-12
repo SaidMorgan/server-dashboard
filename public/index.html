@@ -45,6 +45,11 @@
 
       <div class="countdown hidden"></div>
 
+      <div class="update-banner hidden">
+        <span class="update-text"></span>
+        <button data-act="steamCancel" class="mini update-cancel hidden">Start it anyway</button>
+      </div>
+
       <div class="section players-list">
         <h3>Players</h3>
         <ul class="playerlist"></ul>
@@ -61,6 +66,7 @@
           <button data-act="start" class="btn good">Start</button>
           <button data-act="restart" class="btn warn">Restart now</button>
           <button data-act="updateRestart" class="btn warn" title="Run the update command, then restart">Update &amp; restart</button>
+          <button data-act="steamUpdate" class="btn warn game-only" title="Ask Steam whether there is a newer build. If there is, the server stops so you can install it in Steam, and starts itself again afterwards.">Check for update</button>
           <button data-act="stop" class="btn bad">Stop</button>
           <button data-act="save" class="btn game-only">Save world</button>
         </div>

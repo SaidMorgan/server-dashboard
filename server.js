@@ -11,6 +11,7 @@ import { Actions } from './src/actions.js';
 import { Backups } from './src/backup.js';
 import { Notifier } from './src/notify.js';
 import { Scheduler, describeCron, nextRun } from './src/scheduler.js';
+import { SteamUpdates } from './src/steam.js';
 import { closeAll } from './src/rcon.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -49,14 +50,17 @@ const actions = new Actions(config, monitor);
 const backups = new Backups(config, monitor, actions);
 const notifier = new Notifier(config);
 const scheduler = new Scheduler(config, monitor, actions, backups, config.dataDir);
+const steam = new SteamUpdates(config, monitor, config.dataDir);
 
 // These four know about each other, so the wiring happens here rather than
 // through constructor arguments that would be circular.
 actions.backups = backups;
 monitor.attach({ actions, notifier });
+steam.attach({ actions });
 
 monitor.start();
 scheduler.start();
+steam.start();
 
 const app = express();
 app.set('trust proxy', true);
@@ -80,6 +84,10 @@ const publicTarget = (t) => {
     consoleCommands: profile?.consoleCommands ?? [],
     canStart: Boolean(t.startCommand) || t.kind === 'service',
     canUpdate: t.kind === 'service' && Boolean(t.preRestartCommand),
+    // Only offered when a Steam manifest for this app was actually found on
+    // disk. A hand-copied install has nothing to read, so it gets no button
+    // instead of one that can only ever explain why it doesn't work.
+    canSteamUpdate: steam.managed(t.id),
     gamePort: t.gamePort ?? null, rconPort: t.rconPort ?? null,
     maxPlayers: t.maxPlayers ?? null, serviceName: t.serviceName ?? null,
     healthUrl: t.healthUrl ?? null, hasLog: Boolean(t.logFile || t.logDir),
@@ -97,6 +105,7 @@ function statusPayload() {
     host: os.hostname(),
     targets: monitor.snapshot(),
     pending: actions.pendingInfo(),
+    updates: steam.snapshot(),
   };
 }
 
@@ -286,6 +295,9 @@ app.post('/api/action/:id', async (req, res) => {
       case 'broadcast':      return res.json(await actions.broadcast(id, String(message || '').trim()));
       case 'scheduleRestart':return res.json(actions.scheduleRestart(id, Number(minutes) || 15, reason || 'scheduled restart'));
       case 'cancelRestart':  return res.json(actions.cancelRestart(id));
+      case 'steamCheck':     return res.json(await steam.check(id, { force: true }));
+      case 'steamUpdate':    return res.json(await steam.begin(id));
+      case 'steamCancel':    return res.json(await steam.cancel(id));
       default:               return res.status(400).json({ ok: false, error: `unknown action: ${action}` });
     }
   } catch (err) {
@@ -306,6 +318,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
     monitor.stop();
     scheduler.stop();
+    steam.stop();
     closeAll();
     for (const res of streamClients) { try { res.end(); } catch { /* already gone */ } }
     server.close(() => process.exit(0));

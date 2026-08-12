@@ -2,7 +2,7 @@
 // player warnings, saves, broadcasts, raw RCON.
 import { rconCommand } from './rcon.js';
 import { getProfile } from './games/index.js';
-import { launchDetached, killProcess, controlService, runCommands } from './win.js';
+import { launchDetached, killProcess, controlService, runCommands, getProcessStats } from './win.js';
 
 // --- tunables ---------------------------------------------------------------
 // Sensible defaults for the servers this was built against. Change them here;
@@ -26,6 +26,12 @@ const DEFAULT_SHUTDOWN_GRACE_SECONDS = 90;
 // an npm install on a cold cache is not.
 const DEFAULT_PRE_RESTART_MINUTES = 5;
 
+// How long a server that refused the shutdown command gets before it is killed.
+// Well short of the full grace — nothing is winding down, so there is nothing to
+// wait for — but not instant: the usual reason for a refusal is a server still
+// loading its world, and a reply can be lost by a server that is in fact exiting.
+const REFUSED_SHUTDOWN_GRACE_MS = 45_000;
+
 const SAVE_FLUSH_MS = 3000;          // let a save reach disk before asking to exit
 const RESTART_GAP_MS = 5000;         // pause between the process dying and relaunch
 const STOP_POLL_MS = 3000;           // how often to check whether it exited yet
@@ -43,6 +49,16 @@ export class Actions {
     const t = this.config.targets.find((x) => x.id === id);
     if (!t) throw new Error(`unknown target: ${id}`);
     return t;
+  }
+
+  // A service only counts as up once its health check passes, so its blackout
+  // has to cover the warm-up and not just the restart. When it falls short the
+  // service comes back *after* the blackout ends, which is indistinguishable
+  // from an unplanned outage that recovered on its own — and that pushed a
+  // "Back online" to the channel every single night. readyAfterSeconds is how
+  // long the thing takes to answer for itself.
+  serviceBlackout(t) {
+    return t?.readyAfterSeconds ? t.readyAfterSeconds * 1000 : SUPPRESS_SERVICE_MS;
   }
 
   // Every game-facing action goes through a profile, so adding a game means
@@ -125,7 +141,7 @@ export class Actions {
     const t = this.target(id);
     if (t.kind === 'service') {
       this.monitor.suppress(id, true);
-      setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_SERVICE_MS).unref?.();
+      setTimeout(() => this.monitor.suppress(id, false), this.serviceBlackout(t)).unref?.();
       return controlService(t.serviceName, 'stop', t.nssm);
     }
 
@@ -135,16 +151,27 @@ export class Actions {
     // A game with no remote interface can't be asked politely — the process
     // table is the only handle we have. Most such servers save on SIGTERM.
     if (profile.transport === 'none') {
-      await killProcess(t.processName);
-      this.monitor.addAlert('info', id, 'Stopped (no remote interface — process terminated)', 'restart');
+      const killed = await killProcess(t.processName);
+      await this.monitor.pollOnce().catch(() => {});
       setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_SETTLE_MS).unref?.();
+      if (!killed.ok) {
+        this.monitor.addAlert('error', id, `Could not stop the server — ${killed.error}`);
+        return { ok: false, error: killed.error };
+      }
+      this.monitor.addAlert('info', id, 'Stopped (no remote interface — process terminated)', 'restart');
       return { ok: true, saved: false, forced: true };
     }
 
     // Palworld renders this as an on-screen countdown — the only server message
     // players can't miss, since announce only reaches the chat panel. ARK exits
     // immediately on doexit, so its countdown is 0.
-    const countdown = t.shutdownCountdownSeconds ?? 0;
+    //
+    // With nobody online there is nobody to warn, so skip it: a minute of grace
+    // for an empty server is a minute of watching a server that could already be
+    // down. An unknown player list — RCON not answering — is not an empty one,
+    // so only a confirmed zero skips the wait.
+    const online = this.monitor.state.get(id)?.players?.length ?? null;
+    const countdown = online === 0 ? 0 : (t.shutdownCountdownSeconds ?? 0);
 
     if (announce) {
       const msg = countdown
@@ -155,39 +182,77 @@ export class Actions {
     const saved = await this.save(id).catch(() => ({ ok: false }));
     await delay(SAVE_FLUSH_MS);
 
-    if (profile.transport === 'rest') {
-      await profile.rest.shutdown(t, countdown, 'Server restarting').catch(() => {});
-    } else {
-      await this.rcon(id, profile.commands.shutdown).catch(() => {});
+    // Whether the server actually accepted the order to exit decides how long it
+    // is worth waiting. Swallowing this — which is what used to happen — meant a
+    // refused shutdown looked exactly like a slow one: the full countdown and
+    // grace period would elapse in silence before the process was killed
+    // anyway. A server still loading its world is the common case; it answers
+    // /save and refuses /shutdown.
+    const asked = profile.transport === 'rest'
+      ? await profile.rest.shutdown(t, countdown, 'Server restarting').catch((err) => ({ ok: false, error: err.message }))
+      : await this.rcon(id, profile.commands.shutdown).catch((err) => ({ ok: false, error: err.message }));
+
+    if (!asked.ok) {
+      this.monitor.addAlert('warn', id,
+        `The server refused the shutdown command (${asked.error}) — it will be force-killed instead`,
+        'restart');
     }
 
     // Wait out the countdown itself, plus grace for the world to flush to disk,
     // before force-killing. Force-killing mid-countdown would defeat the point.
-    const deadline = Date.now() + (countdown + this.shutdownGraceSeconds) * 1000;
+    const waitingSince = Date.now();
+    const waited = () => Math.round((Date.now() - waitingSince) / 1000);
+    // Nothing was asked to exit, so there is no countdown to sit through and no
+    // world being flushed: just enough time for the save that already went
+    // through to land, then the kill.
+    const deadline = waitingSince + (asked.ok
+      ? (countdown + this.shutdownGraceSeconds) * 1000
+      : REFUSED_SHUTDOWN_GRACE_MS);
+
     while (Date.now() < deadline) {
       await delay(STOP_POLL_MS);
-      const snap = await this.monitor.pollOnce().then((s) => s.find((x) => x.id === id));
-      if (!snap?.up) {
-        this.monitor.addAlert('info', id, 'Stopped cleanly', 'restart');
+      // Just this one process. The old version ran the entire poll loop — every
+      // target, RCON round-trips and all — every few seconds at a server in the
+      // middle of writing a large world to disk, which is the worst possible
+      // moment to add load to it.
+      const stats = await getProcessStats([t.processName]);
+      if (!stats[t.processName]?.running) {
+        // One real poll now that it is down, so the card and anything that asks
+        // "is it up?" next — restartNow's start, for one — see the truth.
+        await this.monitor.pollOnce().catch(() => {});
+        this.monitor.addAlert('info', id, `Stopped cleanly after ${waited()}s`, 'restart');
         setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_SETTLE_MS).unref?.();
-        return { ok: true, saved: saved.ok, forced: false };
+        return { ok: true, saved: saved.ok, forced: false, seconds: waited() };
       }
     }
 
-    await killProcess(t.processName);
+    const killed = await killProcess(t.processName);
+    await this.monitor.pollOnce().catch(() => {});
+    setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_SETTLE_MS).unref?.();
+
+    // A kill that didn't work is the one outcome the caller must not treat as a
+    // stopped server: on top of it goes a restart that starts a second copy on
+    // the same ports, or a Steam update against files that are still open.
+    if (!killed.ok) {
+      this.monitor.addAlert('error', id,
+        `Still running ${waited()}s after being asked to stop, and the forced kill failed — ${killed.error}`);
+      return { ok: false, error: killed.error, saved: saved.ok, seconds: waited() };
+    }
+
     // A warn, but still part of a stop somebody asked for: the dashboard wanted
     // it down and it is down. The feed records how it went; the channel doesn't
     // need it.
-    this.monitor.addAlert('warn', id, 'Did not exit on request — process was force-killed', 'restart');
-    setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_SETTLE_MS).unref?.();
-    return { ok: true, saved: saved.ok, forced: true };
+    this.monitor.addAlert('warn', id,
+      `Did not exit on request within ${waited()}s — the process and everything it started were force-killed`,
+      'restart');
+    return { ok: true, saved: saved.ok, forced: true, seconds: waited() };
   }
 
   async restartNow(id) {
     const t = this.target(id);
     if (t.kind === 'service') {
       this.monitor.suppress(id, true);
-      setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_SERVICE_MS).unref?.();
+      setTimeout(() => this.monitor.suppress(id, false), this.serviceBlackout(t)).unref?.();
       const res = await controlService(t.serviceName, 'restart', t.nssm);
       // A restart that worked is bookkeeping; one that failed is an issue, so
       // only the success carries the mutable category.
@@ -212,7 +277,17 @@ export class Actions {
 
     await delay(RESTART_GAP_MS);
     const started = await this.start(id);
-    this.monitor.addAlert('info', id, 'Restart complete', 'restart');
+
+    // "Restart complete" used to be logged whether or not the server came back,
+    // and as routine restart chatter it was muted everywhere that would have
+    // told you. A restart that stopped a server and failed to start it is the
+    // one event most worth an interruption, so it goes out uncategorised.
+    if (started.ok) {
+      this.monitor.addAlert('info', id, 'Restart complete', 'restart');
+    } else {
+      this.monitor.addAlert('error', id,
+        `Restart failed — the server was stopped but did not come back up: ${started.error}`);
+    }
     return { ok: started.ok, forced: stopped.forced, error: started.error, backup: backup?.file ?? null };
   }
 
@@ -239,7 +314,7 @@ export class Actions {
     this.monitor.suppress(id, true);
     // The update sits inside the downtime, so the blackout has to cover it.
     const unsuppress = () => {
-      setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_SERVICE_MS).unref?.();
+      setTimeout(() => this.monitor.suppress(id, false), this.serviceBlackout(t)).unref?.();
     };
 
     // controlService confirms the service reached Stopped rather than taking the

@@ -36,11 +36,11 @@
       // Which levels this channel wants.
       "events": ["error", "warn"],
 
-      // Categories to drop regardless of level. Backups and planned restarts
-      // are routine bookkeeping, better read in the dashboard than pushed to
-      // everyone's phone — a nightly reset that goes to plan says nothing you
-      // didn't already know was coming. The activity feed keeps them either way.
-      "mute": ["backup", "restart"],
+      // Categories to drop regardless of level. Backups, planned restarts and
+      // Steam update news are routine bookkeeping, better read in the dashboard
+      // than pushed to everyone's phone — a nightly reset that goes to plan says
+      // nothing you didn't already know was coming. The feed keeps them either way.
+      "mute": ["backup", "restart", "update"],
 
       // The reverse: categories to send even when their level isn't in
       // "events". "recovery" is the all-clear after an unplanned outage — it's
@@ -72,11 +72,35 @@
     "keep": 200
   },
 
+  // A service target can also carry "readyAfterSeconds": how long it takes to
+  // answer its healthUrl after being started. Alerts for it stay suppressed that
+  // long after a managed restart, so a slow-starting API doesn't report the tail
+  // of its own nightly restart as an outage that recovered.
+
   "restart": {
     // Extra seconds after a shutdown countdown ends before the process is
     // force-killed. The countdown ends when the server *starts* exiting;
     // flushing a large world to disk happens after that.
     "graceSeconds": 90
+  },
+
+  // Steam build checks, for game targets that have a "steamAppId" (most fill it
+  // in from their game profile). The dashboard never downloads anything: it
+  // compares the build Steam has installed against the one Steam is publishing,
+  // and the "Check for update" button stops the server so YOU can install the
+  // update in the Steam client. It starts the server again by itself once the
+  // files change. See README.md.
+  "steam": {
+    // How often to check in the background. A new alert is raised once per new
+    // build, not once per check.
+    "checkMinutes": 360,
+
+    // How long to keep a server stopped waiting for you to press Update in
+    // Steam. When this runs out the server is started again on the build it
+    // already has, rather than staying down overnight.
+    "waitMinutes": 60
+
+    // "library": "D:\\SteamLibrary\\steamapps"  // extra folder to look in
   },
 
   "targets": [

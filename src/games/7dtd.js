@@ -11,6 +11,8 @@ export default {
   defaults: {
     gamePort: 26900,
     rconPort: 8081,
+    // "7 Days to Die Dedicated Server" on Steam — see src/steam.js.
+    steamAppId: 294420,
   },
 
   commands: {

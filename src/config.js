@@ -184,6 +184,21 @@ const DEFAULTS = {
     // recent-activity view, not an audit log.
     keep: 200,
   },
+  // Steam build checks for game targets that carry a steamAppId. See src/steam.js.
+  steam: {
+    // How often to compare the installed build against the one Steam publishes.
+    // Six hours: a dedicated server build lands a few times a week at most, and
+    // the answer only matters when you are about to act on it.
+    checkMinutes: 360,
+    // How long the dashboard keeps a server stopped waiting for you to press
+    // Update in Steam. When this runs out it starts the server again on the
+    // build that is still on disk, rather than leaving it down overnight.
+    waitMinutes: 60,
+    // An extra steamapps folder to look in, if the install is somewhere the
+    // default library and libraryfolders.vdf don't mention. Per-target
+    // steamLibrary wins over this.
+    library: null,
+  },
   restart: {
     // Extra seconds allowed after a shutdown countdown ends before the process
     // is force-killed. The countdown ends when the server *starts* exiting;
@@ -226,7 +241,8 @@ const ALERT_LEVELS = ['info', 'warn', 'error'];
 //   backup    archive successes and failures
 //   restart   planned stop/start chatter, whether scheduled or clicked
 //   recovery  a target coming back up after an unplanned outage
-const ALERT_CATEGORIES = ['backup', 'restart', 'recovery'];
+//   update    Steam build checks and everything the Update button does
+const ALERT_CATEGORIES = ['backup', 'restart', 'recovery', 'update'];
 
 function check(errors, cond, message) {
   if (!cond) errors.push(message);
@@ -376,6 +392,22 @@ function validateTarget(t, i, seen, errors) {
     errors.push(`${at}.maxPlayers: expected a number`);
   }
 
+  // Steam update checks. Most games fill steamAppId in from their profile, so
+  // this usually only fires for a hand-written one.
+  if (t.steamAppId !== undefined && t.steamAppId !== null
+    && !(isNum(t.steamAppId) && t.steamAppId > 0 && Number.isInteger(t.steamAppId))) {
+    errors.push(
+      `${at}.steamAppId: expected the Steam app id of the DEDICATED SERVER as a number, `
+      + `e.g. 2394010 for Palworld — it is the number in the store URL, and it is not the game's own id`,
+    );
+  }
+  if (t.steamLibrary !== undefined && t.steamLibrary !== null && !isStr(t.steamLibrary)) {
+    errors.push(`${at}.steamLibrary: expected a path to a steamapps folder, e.g. "D:\\\\SteamLibrary\\\\steamapps"`);
+  }
+  if (t.steamLibrary && t.steamAppId === undefined) {
+    errors.push(`${at}.steamLibrary: set without steamAppId, so nothing would ever look in it`);
+  }
+
   if (profile.transport === 'rest') {
     check(errors, isNum(t.restPort), `${at}.restPort: required for ${profile.label}`);
     check(errors, isStr(t.adminPassword),
@@ -458,6 +490,8 @@ function validate(config, errors) {
     ['backups.zipTimeoutMinutes', config.backups?.zipTimeoutMinutes],
     ['alerts.keep', config.alerts?.keep],
     ['restart.graceSeconds', config.restart?.graceSeconds],
+    ['steam.checkMinutes', config.steam?.checkMinutes],
+    ['steam.waitMinutes', config.steam?.waitMinutes],
   ]) {
     check(errors, isNum(value) && value > 0, `${where}: expected a positive number, got ${JSON.stringify(value)}`);
   }

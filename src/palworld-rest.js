@@ -82,7 +82,13 @@ export async function save(target) {
 }
 
 // waittime is in seconds; players see the message before the server goes down.
+//
+// Never zero. A zero wait does not shut the server down — it keeps running until
+// something kills it, which looks from the outside exactly like a server that is
+// slow to exit. A non-zero wait is honoured, and one second is the same thing to
+// a player as none.
 export async function shutdown(target, waittime = 10, message = 'Server restarting') {
-  const res = await call(target, 'POST', '/shutdown', { waittime, message });
-  return res.ok ? { ok: true, body: `shutting down in ${waittime}s` } : res;
+  const secs = Math.max(1, Math.round(Number(waittime) || 0));
+  const res = await call(target, 'POST', '/shutdown', { waittime: secs, message });
+  return res.ok ? { ok: true, body: `shutting down in ${secs}s` } : res;
 }

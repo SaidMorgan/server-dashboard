@@ -30,7 +30,7 @@ export class Monitor {
     this.state = new Map();   // id -> latest snapshot
     this.history = new Map(); // id -> [{t, up, players, cpu, memMB, ms}]
     this.alerts = [];
-    this.suppressed = new Set(); // ids under a managed restart — don't cry wolf
+    this.suppressed = new Map(); // id -> how many operations are holding the blackout
     this.cpuSamples = new Map(); // processName -> {cpuSeconds, at} for % between polls
     this.cores = os.cpus().length || 1;
     this.alertLimit = config.alerts?.keep ?? DEFAULT_ALERT_LIMIT;
@@ -97,9 +97,29 @@ export class Monitor {
     return alert;
   }
 
+  // Reference-counted, not a flag. Managed operations overlap all the time: a
+  // start's 90-second blackout is still ticking when the next stop begins, and a
+  // stop runs inside a Steam update that is holding its own. With a flag,
+  // whichever operation finished first lifted the blackout for every other one
+  // still running — and the very next poll would report the outage the dashboard
+  // had itself just caused, then arm the watchdog and restart a server somebody
+  // had deliberately stopped a minute earlier.
+  //
+  // So each operation takes a hold and releases exactly one, and the blackout
+  // lasts until the last of them is done.
   suppress(id, on) {
-    if (on) this.suppressed.add(id);
-    else this.suppressed.delete(id);
+    const held = this.suppressed.get(id) || 0;
+    if (on) {
+      this.suppressed.set(id, held + 1);
+    } else if (held <= 1) {
+      this.suppressed.delete(id);
+    } else {
+      this.suppressed.set(id, held - 1);
+    }
+  }
+
+  isSuppressed(id) {
+    return (this.suppressed.get(id) || 0) > 0;
   }
 
   async pollOnce() {
@@ -269,7 +289,7 @@ export class Monitor {
 
   #diffAndAlert(prev, snap) {
     if (!prev) return;
-    if (this.suppressed.has(snap.id)) return;
+    if (this.isSuppressed(snap.id)) return;
 
     if (prev.up && !snap.up) {
       this.addAlert('error', snap.id, snap.kind === 'game'
@@ -318,7 +338,7 @@ export class Monitor {
 
     const timer = setTimeout(() => {
       this.watchdogTimers.delete(id);
-      if (this.state.get(id)?.up || this.suppressed.has(id)) return;
+      if (this.state.get(id)?.up || this.isSuppressed(id)) return;
 
       // Flap protection: a server that crashes on startup would otherwise be
       // restarted forever, which is worse than leaving it down and saying so.

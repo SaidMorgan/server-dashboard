@@ -401,11 +401,45 @@ function dirOf(p) {
   return cut === -1 ? '.' : p.slice(0, cut);
 }
 
+// The last resort when a server won't exit on request.
+//
+// Two things this has to get right. First, kill the *tree*: a game server
+// started from a .bat has a console host above it and often a launcher process
+// too, and those keep running — and keep the install locked — after the server
+// itself is gone. taskkill /T is the only reliable way to take the lot on
+// Windows PowerShell 5.1.
+//
+// Second, tell the truth. Stop-Process is a non-terminating error when it is
+// denied, so the old version reported a clean kill whether or not anything
+// died. A caller that believes a dead server is dead will happily start a
+// second copy on the same ports.
 export async function killProcess(processName) {
-  const res = await ps(
-    `Get-Process -Name '${processName}' -ErrorAction SilentlyContinue | Stop-Process -Force; $?`,
-  );
-  return res.ok ? { ok: true } : { ok: false, error: res.error };
+  const name = String(processName).replace(/'/g, "''");
+  const res = await ps(`
+    $ErrorActionPreference = 'SilentlyContinue'
+    $procs = @(Get-Process -Name '${name}')
+    if (-not $procs) { 'gone'; return }
+    foreach ($p in $procs) { taskkill.exe /PID $p.Id /T /F 2>&1 | Out-Null }
+
+    # Windows tears a process down asynchronously; a check on the next line can
+    # still see it. Give it a moment before deciding it survived.
+    $deadline = (Get-Date).AddSeconds(5)
+    do {
+      Start-Sleep -Milliseconds 400
+      $left = @(Get-Process -Name '${name}')
+    } while ($left -and (Get-Date) -lt $deadline)
+
+    if ($left) { 'alive:' + (($left | ForEach-Object { $_.Id }) -join ',') } else { 'gone' }`);
+
+  if (!res.ok) return { ok: false, error: res.error };
+  if (res.out.startsWith('alive:')) {
+    return {
+      ok: false,
+      error: `${processName} is still running as pid ${res.out.slice(6)} after a forced kill `
+        + `— it is probably running as another user or elevated, and the dashboard cannot touch it`,
+    };
+  }
+  return { ok: true };
 }
 
 export async function checkHealth(url, timeout = 4000) {
