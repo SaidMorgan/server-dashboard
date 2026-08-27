@@ -199,6 +199,30 @@ pair do it again — a restart loop that looks like a crash loop. Set both to `-
 or turn the watchdog off for this target. Do not leave the defaults and the
 watchdog both on.
 
+### The browser name comes from the command line, not the ini
+
+`SessionName` in `ServerSettings.ini` does **not** set the name players see. The
+server browser reads `-SteamServerName=` from the command line, and with that
+switch missing UE falls back to the session's raw numeric Steam id -- so the
+server appears in the list as something like `90291711724711955` while looking
+completely healthy in every other respect, right down to a correct player count
+and ping.
+
+```
+IcarusServer.exe -log -QueryPort=27016 -SteamServerName=YourServerName
+```
+
+`SessionName` is worth setting anyway for the other places Icarus uses it, but
+it is the switch that changes the listing. Verify with:
+
+```
+(Get-CimInstance Win32_Process -Filter "Name='IcarusServer-Win64-Shipping.exe'").CommandLine
+```
+
+The launcher passes its arguments through, so the switch should appear on the
+*shipping* exe's command line, not just the launcher's. UE truncates names past
+its internal maximum rather than rejecting them.
+
 ### Prospects, admins and saves
 
 A world is a *prospect*, and the server runs one at a time. With

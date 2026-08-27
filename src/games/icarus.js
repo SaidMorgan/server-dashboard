@@ -44,6 +44,12 @@ export default {
   },
 
   setupNotes: [
+    'The name players see in the server browser comes from -SteamServerName= on',
+    'the command line, not from SessionName in ServerSettings.ini. Without the',
+    'switch the server lists under its raw numeric Steam session id while looking',
+    'perfectly healthy otherwise.',
+    ' ',
+
     'Icarus ships two self-shutdown timers, ShutdownIfNotJoinedFor and',
     'ShutdownIfEmptyFor, both defaulting to 300 seconds. An idle server therefore',
     'exits on purpose five minutes after the last player leaves — which the',
