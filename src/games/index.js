@@ -16,6 +16,7 @@ import minecraft from './minecraft.js';
 import sevenDaysToDie from './7dtd.js';
 import source from './source.js';
 import valheim from './valheim.js';
+import icarus from './icarus.js';
 import processOnly from './process.js';
 
 export const TRANSPORTS = ['rcon-persistent', 'rcon-oneshot', 'rest', 'none'];
@@ -77,7 +78,7 @@ function register(profile, origin) {
   return normalized;
 }
 
-for (const p of [ark, palworld, minecraft, sevenDaysToDie, source, valheim, processOnly]) {
+for (const p of [ark, palworld, minecraft, sevenDaysToDie, source, valheim, icarus, processOnly]) {
   register(p);
 }
 

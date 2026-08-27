@@ -11,6 +11,7 @@ the server, what its commands are called, and how to read its player list.
 | `7dtd` | RCON, per command | yes | yes | RCON password is the telnet password |
 | `source` | RCON, per command | yes | yes | Generic Source engine |
 | `valheim` | none | no | no | Vanilla exposes no remote interface |
+| `icarus` | none | no | no | SteamCMD-only install. Its self-shutdown timers fight the watchdog |
 | `process` | none | no | no | Monitor and control any process |
 
 ---
@@ -120,6 +121,99 @@ rcon.password=your-password
 dashboard can't tell them apart, so **per-process CPU and RAM may report the
 wrong server**. Player counts and RCON control are unaffected, since those go
 over RCON to a specific port.
+
+---
+
+## Icarus
+
+Icarus has no RCON, no REST and no console, so the profile is `transport: none`:
+up/down, uptime, CPU, RAM, history, crash alerts, the watchdog, backups and
+scheduled restarts work; the player list and broadcasts do not. Administration
+happens in-game, from a client whose Steam ID you have made an admin.
+
+### It is a SteamCMD-only install
+
+"Icarus Dedicated Server" (app **2089300**) is a Tool that never appears in the
+Steam client's library, so unlike ARK and Palworld you cannot install or update
+it by clicking Update in Steam. It lives outside the client's library entirely:
+
+```
+C:\steamcmd\steamcmd.exe +force_install_dir C:\GameServers\IcarusServer ^
+  +login anonymous +app_update 2089300 validate +quit
+```
+
+Anonymous login is enough — owning Icarus is not required to run the server.
+
+Two consequences for the dashboard. The target needs **`steamLibrary`** pointing
+at SteamCMD's own folder (`...\IcarusServer\steamapps`), or the build check has no
+manifest to read and the card silently gets no update badge. And the update
+itself is the command above rather than a click, so when the dashboard reports a
+new build, stop the server, run it, and start the server again.
+
+SteamCMD exits with **code 7** after it updates itself, even on a completely
+successful install. Check `StateFlags` in the appmanifest — `4` means installed —
+rather than trusting the exit code.
+
+### The query port will collide, and the failure is silent
+
+Icarus registers with Steam through its query port, default **27015** — the same
+port every other Steam server on the box wants. Palworld holds it here.
+
+When Icarus loses that race it does not fail loudly. It starts normally, listens
+on 17777, and is simply invisible: nobody can find or join it. The only evidence
+is in `Icarus\Saved\Logs\Icarus.log`:
+
+```
+LogSteamShared: Warning: Steam Dedicated Server API failed to initialize.
+LogOnline: STEAM: [AppId: 1149460] Game Server API initialized 0
+LogOnline: Warning: Failed to initialize Steam, this could be due to a Steam
+           server and client running on the same machine.
+```
+
+That last line sends you hunting for a Steam client conflict. Usually it is just
+the port. Give Icarus its own with `-QueryPort=` on the command line — this
+install uses 27016 — and confirm you get `Game Server API initialized 1`.
+
+### The self-shutdown timers fight the watchdog
+
+`ServerSettings.ini` is **not generated on first run**; you write it yourself at
+`Icarus\Saved\Config\WindowsServer\ServerSettings.ini`:
+
+```ini
+[/Script/Icarus.DedicatedServerSettings]
+SessionName=Your server
+JoinPassword=
+MaxPlayers=8
+AdminPassword=something-long
+ShutdownIfNotJoinedFor=-1
+ShutdownIfEmptyFor=-1
+AllowNonAdminsToLaunchProspects=True
+AllowNonAdminsToDeleteProspects=False
+ResumeProspect=True
+```
+
+`ShutdownIfNotJoinedFor` and `ShutdownIfEmptyFor` default to **300 seconds**, so
+a stock server deliberately exits five minutes after the last player leaves. The
+watchdog cannot tell that from a crash, restarts it, and five minutes later the
+pair do it again — a restart loop that looks like a crash loop. Set both to `-1`,
+or turn the watchdog off for this target. Do not leave the defaults and the
+watchdog both on.
+
+### Prospects, admins and saves
+
+A world is a *prospect*, and the server runs one at a time. With
+`ResumeProspect=True` it reloads the last one after a restart. You do not have to
+name a prospect in the ini: an admin launches one from the in-game Dedicated
+Servers menu, which is the normal workflow.
+
+Saves live under `Icarus\Saved\PlayerData`, which is what `backup.paths` points at.
+Note the folder does not exist until the server has run a prospect — the backup
+job reports a missing source folder rather than writing an empty archive, so
+create it or run a prospect before trusting the schedule.
+
+Stop is safe: the launcher `IcarusServer.exe` exits by itself when the real
+`IcarusServer-Win64-Shipping.exe` is killed, so `processName` should be the
+shipping exe and nothing is orphaned.
 
 ---
 
