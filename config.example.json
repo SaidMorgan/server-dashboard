@@ -179,6 +179,24 @@
       "processName": "PalServer-Win64-Shipping-Cmd",
       "startCommand": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\PalServer\\Start.bat",
 
+      // Steam Workshop mods: reported, never installed. The game itself can be
+      // updated unattended because app_update is verifiable and repairable; a
+      // mod is built against one game build, can take the server down on the
+      // first player join, and has no validate to undo it. So a stale mod
+      // raises a flag on the card and in your alert channel, and you refresh it
+      // in whatever mod manager put it there.
+      //
+      // appId is the GAME, not the dedicated server -- workshop items belong to
+      // the game, so this is 1623730 for Palworld while steamAppId is 2394010.
+      // modsDir holds one subfolder per installed mod, each with the
+      // InstallManifest.json naming the workshop item it came from.
+      // workshopDir is optional and only needed if the Steam client lives
+      // somewhere other than the default library.
+      "workshopMods": {
+        "appId": 1623730,
+        "modsDir": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\PalServer\\Mods\\ManagedMods"
+      },
+
       "backup": {
         "enabled": true,
         "paths": ["C:\\Program Files (x86)\\Steam\\steamapps\\common\\PalServer\\Pal\\Saved\\SaveGames"],

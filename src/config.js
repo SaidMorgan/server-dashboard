@@ -199,6 +199,15 @@ const DEFAULTS = {
     // steamLibrary wins over this.
     library: null,
   },
+  // Steam Workshop mod checks, for game targets that carry a workshopMods
+  // block. Detection only -- see src/workshop.js for why nothing is installed
+  // automatically.
+  workshop: {
+    // Mods publish far less often than game builds, and the dashboard never
+    // acts on the answer by itself, so there is nothing to gain from asking
+    // more often than this.
+    checkMinutes: 360,
+  },
   restart: {
     // Extra seconds allowed after a shutdown countdown ends before the process
     // is force-killed. The countdown ends when the server *starts* exiting;
@@ -406,6 +415,30 @@ function validateTarget(t, i, seen, errors) {
   }
   if (t.steamLibrary && t.steamAppId === undefined) {
     errors.push(`${at}.steamLibrary: set without steamAppId, so nothing would ever look in it`);
+  }
+
+  // Workshop mod checks. Both halves are required or there is nothing to
+  // compare: the app id says which acf to read, the folder says what is
+  // actually installed.
+  if (t.workshopMods !== undefined && t.workshopMods !== null) {
+    const w = t.workshopMods;
+    if (typeof w !== 'object' || Array.isArray(w)) {
+      errors.push(`${at}.workshopMods: expected an object with appId and modsDir`);
+    } else {
+      if (!(isNum(w.appId) && w.appId > 0 && Number.isInteger(w.appId))) {
+        errors.push(
+          `${at}.workshopMods.appId: expected the Steam app id of the GAME as a number, `
+          + `e.g. 1623730 for Palworld — workshop items belong to the game, not to the `
+          + `dedicated server app, so this is not the same number as steamAppId`,
+        );
+      }
+      check(errors, isStr(w.modsDir),
+        `${at}.workshopMods.modsDir: required — the folder holding one subfolder per `
+        + `installed mod, each with an InstallManifest.json`);
+      if (w.workshopDir !== undefined && w.workshopDir !== null && !isStr(w.workshopDir)) {
+        errors.push(`${at}.workshopMods.workshopDir: expected a path to a steamapps\\workshop folder`);
+      }
+    }
   }
 
   // Filled in from the profile's defaults for a stock setup; only a target that

@@ -12,6 +12,7 @@ import { Backups } from './src/backup.js';
 import { Notifier } from './src/notify.js';
 import { Scheduler, describeCron, nextRun } from './src/scheduler.js';
 import { SteamUpdates } from './src/steam.js';
+import { WorkshopMods } from './src/workshop.js';
 import { closeAll } from './src/rcon.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -51,6 +52,7 @@ const backups = new Backups(config, monitor, actions);
 const notifier = new Notifier(config);
 const scheduler = new Scheduler(config, monitor, actions, backups, config.dataDir);
 const steam = new SteamUpdates(config, monitor, config.dataDir);
+const workshop = new WorkshopMods(config, monitor);
 
 // These four know about each other, so the wiring happens here rather than
 // through constructor arguments that would be circular.
@@ -61,6 +63,7 @@ steam.attach({ actions });
 monitor.start();
 scheduler.start();
 steam.start();
+workshop.start();
 
 const app = express();
 app.set('trust proxy', true);
@@ -94,6 +97,9 @@ const publicTarget = (t) => {
     // disk. A hand-copied install has nothing to read, so it gets no button
     // instead of one that can only ever explain why it doesn't work.
     canSteamUpdate: steam.managed(t.id),
+    // Workshop mods are reported, never installed, so this only decides whether
+    // the card can show a mod line at all.
+    hasModChecks: workshop.managed(t.id),
     gamePort: t.gamePort ?? null, rconPort: t.rconPort ?? null,
     queryPort: t.queryPort ?? null,
     maxPlayers: t.maxPlayers ?? null, serviceName: t.serviceName ?? null,
@@ -113,6 +119,7 @@ function statusPayload() {
     targets: monitor.snapshot(),
     pending: actions.pendingInfo(),
     updates: steam.snapshot(),
+    mods: workshop.snapshot(),
   };
 }
 
@@ -305,6 +312,7 @@ app.post('/api/action/:id', async (req, res) => {
       case 'steamCheck':     return res.json(await steam.check(id, { force: true }));
       case 'steamUpdate':    return res.json(await steam.begin(id));
       case 'steamCancel':    return res.json(await steam.cancel(id));
+      case 'modsCheck':      return res.json(workshop.check(id));
       default:               return res.status(400).json({ ok: false, error: `unknown action: ${action}` });
     }
   } catch (err) {

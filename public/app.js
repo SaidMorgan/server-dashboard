@@ -442,6 +442,46 @@ function renderUpdate(node, u) {
   }
 }
 
+// Mods are never installed automatically, so this line is a notice rather than
+// a control: it says what is waiting and leaves the doing to you. Absent from
+// the payload means every mod is current, which is the usual case and deserves
+// no space on the card.
+function renderMods(node, m) {
+  const box = node.querySelector('.mods-banner');
+  const text = node.querySelector('.mods-text');
+  if (!box) return;
+
+  if (!m) {
+    box.classList.add('hidden');
+    return;
+  }
+
+  box.classList.remove('hidden');
+  box.classList.toggle('bad', Boolean(m.error));
+
+  if (m.error) {
+    text.textContent = `Mod check failed — ${m.error}`;
+    return;
+  }
+
+  const parts = [];
+  if (m.stale?.length) {
+    parts.push(`\u{1F9E9} ${m.stale.length} mod update${m.stale.length > 1 ? 's' : ''} waiting `
+      + `(${m.stale.join(', ')}) — refresh in your mod manager. Mods are not updated automatically.`);
+  }
+  // Worth saying out loud rather than leaving as a silent "current": these are
+  // pinned forever, which is fine until you are waiting on a fix that is never
+  // going to arrive.
+  if (m.unsubscribed?.length) {
+    parts.push(`Not subscribed in Steam: ${m.unsubscribed.join(', ')} — these will never update.`);
+  }
+  if (!parts.length) {
+    box.classList.add('hidden');
+    return;
+  }
+  text.textContent = parts.join(' ');
+}
+
 // A service card has no player list, which left it noticeably barer than a game
 // card. This fills that space with what a service actually has: which Windows
 // service it is, what gets polled, and what that poll last said.
@@ -522,7 +562,7 @@ function statTiles(snap) {
   return tiles;
 }
 
-function render(snap, pending, updates) {
+function render(snap, pending, updates, mods) {
   const node = cards.get(snap.id);
   if (!node) return;
 
@@ -591,6 +631,7 @@ function render(snap, pending, updates) {
 
   const update = updates?.[snap.id];
   renderUpdate(node, update);
+  renderMods(node, mods?.[snap.id]);
 
   const startBtn = node.querySelector('[data-act=start]');
   const stopBtn = node.querySelector('[data-act=stop]');
@@ -857,7 +898,7 @@ function applyStatus(status) {
   for (const snap of status.targets) {
     if (ONLY && snap.id !== ONLY) continue;
     if (!cards.has(snap.id)) buildCard(snap);
-    render(snap, status.pending, status.updates);
+    render(snap, status.pending, status.updates, status.mods);
   }
 
   const allUp = status.targets.filter((t) => !ONLY || t.id === ONLY).every((t) => t.up);

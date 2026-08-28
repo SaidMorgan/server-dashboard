@@ -105,6 +105,100 @@ assuming it failed.
 Shutdowns use Palworld's on-screen countdown, which is the only server message
 players genuinely can't miss.
 
+### It is a SteamCMD install, and the dashboard updates it itself
+
+Palworld's dedicated server *is* in the Steam client's library, and this one used
+to be installed from it. It no longer is. Pointing SteamCMD at the client's
+library gives you two programs each keeping their own record of one folder, which
+is how a working install turns into a re-download at the worst moment -- so the
+server was moved to a SteamCMD-only install that nothing else writes to:
+
+```
+C:\Apps\steamcmd\steamcmd.exe +force_install_dir C:\GameServers\PalServer ^
+  +login anonymous +app_update 2394010 validate +quit
+```
+
+That is the same command the dashboard runs on the Update button and on an
+automatic update, so there is nothing to press in Steam any more. The target
+carries `steamLibrary` (SteamCMD's own `steamapps`, or the build check has no
+manifest to read) and `steamInstallDir` (the `+force_install_dir` layout puts the
+files in the folder itself, not under `steamapps\common`).
+
+**Do not reinstall it in the Steam client.** Two managers, one folder, and the
+first symptom is a 6 GB re-download in the middle of a session.
+
+### Automatic updates wait for an empty server
+
+With `autoUpdate: true` the dashboard installs new builds on its own. The sweep
+runs hourly (`steam.checkMinutes`) and only acts on a **confirmed zero** players
+-- an unknown player list is not an empty one. A populated server is left alone,
+announced once, and picked up by a later sweep.
+
+When it fires: 60-second on-screen countdown, stop, pre-update backup, SteamCMD,
+start. Monitoring is suppressed for the whole run, so the download minutes do not
+read as an outage or wake the watchdog.
+
+`app_update` rewrites depot files only. `Pal\Saved` and `Mods\` are not in the
+depot, so the world, the settings and the whole UE4SS stack come through every
+update untouched -- `validate` included.
+
+### Mods do not update with the game
+
+The mods here come from the Steam Workshop by way of PalSphere.gg, which the
+Steam *client* downloads and PalSphere installs into the server folder. SteamCMD
+logs in anonymously and cannot fetch workshop items, so an automatic game update
+leaves the mods exactly where they were.
+
+That is usually what you want -- but a game version bump can still break a mod
+built against the old one. If the server comes back up after an update and
+something is wrong, check `Mods\NativeMods\UE4SS\UE4SS.log` first; it names each
+mod as it loads. Refreshing mods is a manual pass in PalSphere, pointed at
+`C:\GameServers\PalServer`.
+
+### ...but the dashboard tells you when one is waiting
+
+The `workshopMods` block turns on a sweep that compares what is installed
+against what Steam has already downloaded, and alerts when they differ:
+
+```json
+"workshopMods": {
+  "appId": 1623730,
+  "modsDir": "C:\GameServers\PalServer\Mods\ManagedMods"
+}
+```
+
+`appId` is the **game** (1623730), not the dedicated server (2394010) --
+workshop items belong to the game. Each mod folder carries an
+`InstallManifest.json` naming its workshop item and when it was last written
+into the server; Steam's `appworkshop_1623730.acf` says when each item was last
+downloaded. Newer on Steam than on the server means an update is waiting.
+
+Three states, kept apart because they need different things from you:
+
+| State | Meaning |
+| --- | --- |
+| current | nothing to do |
+| stale | Steam has a newer copy; refresh it in the mod manager |
+| unsubscribed | installed here, not subscribed in the client -- it will never update again |
+
+Two details that decide whether the answer is trustworthy:
+
+**It reads `WorkshopItemsInstalled`, not `WorkshopItemDetails`.** Details carries
+the newest version Steam knows to *exist*; Installed carries what is actually on
+this disk. Comparing against Details would announce updates that the client has
+not downloaded, sending you to the mod manager to find nothing there.
+
+**It reads install times from `InstallManifest.json`, not from file mtimes.**
+Copying a server folder preserves timestamps -- this install was migrated with
+`robocopy /COPY:DAT` -- so mtimes would report every mod as freshly installed on
+a machine where nothing had been installed at all.
+
+Alerts land in the `mods` category, so `notifications.discord.mute` can silence
+them independently of build updates, and each mod is announced once per
+published version rather than once per sweep. `steam.checkMinutes` governs the
+game build sweep; `workshop.checkMinutes` (default 360) governs this one.
+
+
 ---
 
 ## Minecraft
@@ -128,14 +222,33 @@ over RCON to a specific port.
 
 Icarus has no RCON, no REST and no console, so the profile is `transport: none`:
 up/down, uptime, CPU, RAM, history, crash alerts, the watchdog, backups and
-scheduled restarts work; the player list and broadcasts do not. Administration
-happens in-game, from a client whose Steam ID you have made an admin.
+scheduled restarts work; broadcasts and a clean remote shutdown do not.
+Administration happens in-game, from a client whose Steam ID you have made an
+admin.
+
+It can still be read, though. The profile sets `query: { protocol: 'a2s' }`, so
+every poll asks the query port the same question the Steam server browser does
+and gets back the server name and **how many players are on it** — the `3 / 16`
+badge, the history graph, and the join/leave lines in the activity feed. It also
+gives the two decisions that need a player count something real to work from:
+an automatic Steam update waits for a confirmed empty server, and so does
+skipping the shutdown warning.
+
+Names are the one thing missing. Icarus answers `A2S_PLAYER` with the right
+number of entries and an empty string in every name field, so the profile sets
+`names: false` and the card says "2 player(s) online" rather than listing two
+blanks. Who they are is visible in `Icarus.log`, not over the wire.
+
+A "Steam query" tile sits where RCON's would be on other games. It reading
+anything but `answering` while the server is up is the symptom described in
+[the query port section](#the-query-port-will-collide-and-the-failure-is-silent) — a server
+that nobody can find in the browser.
 
 ### It is a SteamCMD-only install
 
 "Icarus Dedicated Server" (app **2089300**) is a Tool that never appears in the
-Steam client's library, so unlike ARK and Palworld you cannot install or update
-it by clicking Update in Steam. It lives outside the client's library entirely:
+Steam client's library, so like Palworld here it cannot be installed or updated
+by clicking Update in Steam. It lives outside the client's library entirely:
 
 ```
 C:\steamcmd\steamcmd.exe +force_install_dir C:\GameServers\IcarusServer ^
@@ -341,8 +454,15 @@ export default {
   // 'none'             no remote interface; monitor the process only
   transport: 'rcon-oneshot',
 
+  // Optional, and independent of transport: read the player count from the
+  // server's Steam query port (A2S), which needs no password and works even for
+  // transport 'none'. The target needs a queryPort — put one in defaults.
+  // `names: false` skips the A2S_PLAYER round trip for games that answer it with
+  // blank names; the count still comes from A2S_INFO. See icarus.js.
+  query: { protocol: 'a2s', names: true },
+
   // Filled in when config.json omits them.
-  defaults: { gamePort: 27015, rconPort: 27015 },
+  defaults: { gamePort: 27015, rconPort: 27015, queryPort: 27015 },
 
   commands: {
     list: 'players',
