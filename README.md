@@ -117,9 +117,8 @@ six-hourly background check. The dashboard reads the installed build id out of
 Steam's own `appmanifest_<appid>.acf` and compares it with the build Steam is
 publishing for that app.
 
-It never downloads anything. These servers are installed by the Steam *client*,
-and pointing SteamCMD at the client's library leaves two programs each keeping
-their own record of what is installed. So the update is half automatic:
+Without a SteamCMD to drive, the dashboard never downloads anything and the
+update is half automatic:
 
 1. You press **Check for update** (or the background check tells you there's a
    new build). If you're already current, it says so and nothing else happens.
@@ -135,6 +134,47 @@ disabled — the banner's own button is how you bail out and start the server on
 the build it already has. If nothing is installed within `steam.waitMinutes`
 (default 60) it does that for you rather than leaving the server down overnight.
 A wait survives a dashboard restart.
+
+#### Fully automatic updates
+
+Give the dashboard a `steamcmd.exe` and set `autoUpdate` on a target, and steps
+3 and 4 stop being your problem — it stops the server, runs the install itself,
+and starts the server back up on the new build:
+
+```jsonc
+"steam": {
+  "steamcmd": "C:\\Apps\\steamcmd\\steamcmd.exe",
+  "updateTimeoutMinutes": 60      // a cold 9 GB install is not a 5-minute job
+}
+```
+
+```jsonc
+"autoUpdate": true,
+// Only needed for a +force_install_dir install, where the files sit in the
+// folder itself instead of under steamapps\common. Otherwise it is worked out
+// from the manifest.
+"steamInstallDir": "C:\\GameServers\\IcarusServer"
+```
+
+**A Steam-client install does not need moving to SteamCMD for this.** SteamCMD
+updates an existing library folder in place — point `+force_install_dir` at the
+folder the client already installed to, which is what the dashboard does. And
+`app_update` only replaces game files, so saves and configs living under the
+install (Palworld's `Pal\Saved`, ARK's `ShooterGame\Saved`) are untouched. The
+one cost is that both programs then keep their own record of what is installed,
+so the Steam client may offer to verify the app afterwards; letting it is
+harmless.
+
+The background sweep **only updates a server nobody is standing in.** A
+populated one is left alone and picked up by a later sweep, because stopping a
+game with no remote interface is a kill and nobody in it gets a warning. Only a
+confirmed zero counts — an unknown player list is not an empty one.
+
+Success is judged by the build id in the manifest afterwards, never by
+SteamCMD's exit code: it exits 7 on the self-relaunch it does after updating
+itself, with the app update having succeeded. If the install genuinely fails,
+the target falls back to the manual wait above rather than staying down.
+
 
 Most games fill in their app id from their profile (ARK, Palworld, 7 Days to
 Die, Valheim). For anything else, give the target the app id of the **dedicated

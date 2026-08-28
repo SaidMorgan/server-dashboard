@@ -40,6 +40,7 @@ export class Monitor {
     this.notifier = null;
     this.actions = null;
     this.watchdogTimers = new Map(); // id -> pending restart timer
+    this.logHealth = new Map();      // id -> {startedAt, verdict} per server run
     this.restartLog = new Map();     // id -> [timestamps] for flap protection
 
     fs.mkdirSync(dataDir, { recursive: true });
@@ -187,6 +188,13 @@ export class Monitor {
       checkedAt: Date.now(),
     };
 
+    // A profile can name a line that means "this run is broken" even though the
+    // process is up. Nothing else would catch it: for a transport:'none' game
+    // the process table is the only signal, and it says everything is fine.
+    if (running && profile.logHealth && target.logFile) {
+      snap.logHealthError = this.#checkLogHealth(target, profile.logHealth, proc);
+    }
+
     // Games with no query interface at all (Valheim, "process"): the process
     // table is the whole story, so stop here rather than reporting a broken RCON.
     if (profile.transport === 'none') {
@@ -288,8 +296,18 @@ export class Monitor {
   }
 
   #diffAndAlert(prev, snap) {
-    if (!prev) return;
     if (this.isSuppressed(snap.id)) return;
+
+    // First sight of a target. There is no transition to report, but "already
+    // down when the dashboard started" still needs the watchdog: without this
+    // the only thing that ever arms it is an up->down edge, so a server that
+    // was down before the dashboard came up -- after a reboot, or because the
+    // dashboard was restarted while the server happened to be stopped -- stays
+    // down for good, with the card showing it down and nothing acting on it.
+    if (!prev) {
+      if (!snap.up) this.#armWatchdog(snap.id);
+      return;
+    }
 
     if (prev.up && !snap.up) {
       this.addAlert('error', snap.id, snap.kind === 'game'
@@ -319,6 +337,40 @@ export class Monitor {
       for (const n of after) if (!before.has(n)) this.addAlert('info', snap.id, `${n} joined`);
       for (const n of before) if (!after.has(n)) this.addAlert('info', snap.id, `${n} left`);
     }
+  }
+
+  // Scan the tail of a target's log once per run. Keyed on the process start
+  // time, so a restart re-arms it and a healthy run is never read twice: this
+  // sits in a 10-second poll loop and these logs reach hundreds of KB.
+  #checkLogHealth(target, spec, proc) {
+    const startedAt = proc?.startTime ?? null;
+    let entry = this.logHealth.get(target.id);
+    if (!entry || entry.startedAt !== startedAt) {
+      entry = { startedAt, verdict: undefined };
+      this.logHealth.set(target.id, entry);
+    }
+    if (entry.verdict !== undefined) return entry.verdict;
+
+    // Give the run time to actually reach the thing being looked for; a verdict
+    // read too early is a false all-clear.
+    const age = startedAt ? (Date.now() - Date.parse(startedAt)) / 1000 : null;
+    if (age === null || age < (spec.afterSeconds ?? 90)) return null;
+
+    try {
+      const size = fs.statSync(target.logFile).size;
+      const span = Math.min(size, 512 * 1024);
+      const fd = fs.openSync(target.logFile, 'r');
+      const buf = Buffer.alloc(span);
+      fs.readSync(fd, buf, 0, span, size - span);
+      fs.closeSync(fd);
+      entry.verdict = spec.pattern.test(buf.toString('utf8')) ? spec.message : null;
+    } catch {
+      // An unreadable log is not evidence of a broken server — say nothing and
+      // try again on the next run rather than crying wolf.
+      entry.verdict = null;
+    }
+    if (entry.verdict) this.addAlert('error', target.id, entry.verdict);
+    return entry.verdict;
   }
 
   // --- crash watchdog ------------------------------------------------------

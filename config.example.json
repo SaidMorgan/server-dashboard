@@ -98,7 +98,13 @@
     // How long to keep a server stopped waiting for you to press Update in
     // Steam. When this runs out the server is started again on the build it
     // already has, rather than staying down overnight.
-    "waitMinutes": 60
+    "waitMinutes": 60,
+
+    // Path to steamcmd.exe. With it set, a target marked "autoUpdate": true is
+    // stopped, updated and restarted without you touching Steam -- but only
+    // while it is empty. Without it, the dashboard can only stop and wait.
+    "steamcmd": "C:\\Apps\\steamcmd\\steamcmd.exe",
+    "updateTimeoutMinutes": 60
 
     // "library": "D:\\SteamLibrary\\steamapps"  // extra folder to look in
   },

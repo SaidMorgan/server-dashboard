@@ -174,6 +174,70 @@ That last line sends you hunting for a Steam client conflict. Usually it is just
 the port. Give Icarus its own with `-QueryPort=` on the command line — this
 install uses 27016 — and confirm you get `Game Server API initialized 1`.
 
+### `initialized 1` is not the same as registered
+
+Binding the query port and registering a session are two separate steps, and the
+second one can fail on its own:
+
+```
+LogOnline: STEAM: [AppId: 1149460] Game Server API initialized 1
+LogOnline: Warning: OSS: Async task
+  'FOnlineAsyncTaskSteamCreateServer bWasSuccessful: 0' failed in 15.02 seconds
+```
+
+The API came up, the port bound, the prospect loaded, the server sits there
+using 3.5 GB and 0% CPU looking perfect — and it is in **no** browser, LAN or
+internet, because it never created a session to advertise. Unlike the port
+collision this leaves nothing in `netstat` to notice, and the watchdog actively
+hides it: the process is alive, so every check passes.
+
+**The cause is `ResumeProspect=True`.** Steam's CreateServer task has a fixed
+15-second budget and is ticked on the game thread. With ResumeProspect the
+server loads the prospect's terrain immediately at startup, which blocks that
+thread — `LoadMap(/Game/Maps/Terrain_016_OLY/...)` plus a synchronous
+`ULevelStreaming::RequestLevel ... is flushing async loading` — for longer than
+the budget, and registration dies while the world is still loading. Measured on
+this install:
+
+| World loaded | LoadMap | CreateServer |
+| --- | --- | --- |
+| 12 min after start (prospect resumed by hand) | 5.9s | ok |
+| 23s after start | 3.2s | ok |
+| 37s after start | 6.3s | **failed** |
+| 35s after start | 7.1s | **failed** |
+
+It is a race, not a clean threshold, which is why it can look intermittent and
+why a bigger build or a longer-running prospect tips a working server into a
+broken one. `ResumeProspect=False` fixes it outright: the server loads only
+`DedicatedServerEntry` (0.6s), registers, and *then* the prospect is resumed
+from in-game — which keeps the registration, as the 12-minute row above shows.
+The cost is that the world is not up until somebody resumes it, so every
+restart needs a person. Weigh that against a nightly scheduled restart.
+
+Restarting does **not** clear it on its own. What this also needs is *noticing*,
+so the Icarus profile declares a `logHealth` check that the monitor runs once
+per server start:
+
+```js
+logHealth: {
+  afterSeconds: 90,
+  pattern: /Game Server API initialized 0|FOnlineAsyncTaskSteamCreateServer bWasSuccessful: 0/,
+  message: '...',
+}
+```
+
+One scan of the log tail per run, keyed on the process start time so a healthy
+run is never read twice and a restart re-arms it — these logs reach hundreds of
+KB and the poll loop runs every ten seconds. The 90-second delay matters: the
+failure is logged about 45 seconds in, and a verdict read too early is a false
+all-clear. Both patterns are covered because they present identically to a
+player — `initialized 0` is the query port already being taken, `bWasSuccessful:
+0` is the port being fine and Steam not answering.
+
+Note that a server started by the dashboard service runs as **LocalSystem**. You
+cannot `taskkill` it from an ordinary shell — the dashboard can, because it is
+that service, so restart it from the card rather than the command line.
+
 ### The self-shutdown timers fight the watchdog
 
 `ServerSettings.ini` is **not generated on first run**; you write it yourself at

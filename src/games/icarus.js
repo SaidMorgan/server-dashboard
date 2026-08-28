@@ -43,6 +43,30 @@ export default {
     readyAfterSeconds: 120,
   },
 
+  // Binding the query port and registering a session are two different things,
+  // and only the first one fails loudly. The server can initialise the Steam
+  // Game Server API, bind 27016, load the prospect and sit there looking
+  // perfectly healthy while FOnlineAsyncTaskSteamCreateServer has quietly timed
+  // out -- and a server with no session is in no browser, LAN or internet, with
+  // nothing in the process table to suggest why. The watchdog actively hides
+  // this: the process is alive, so every check passes.
+  //
+  // Checked once per start, once the run has had time to get there.
+  logHealth: {
+    afterSeconds: 90,
+    // Two distinct silent failures, same symptom. "initialized 0" is the query
+    // port being unavailable -- something else on the box already has it.
+    // "CreateServer ... bWasSuccessful: 0" is the port being fine and the
+    // registration losing a race: Steam gives that task a fixed 15 seconds and
+    // ticks it on the game thread, which ResumeProspect=True has busy loading
+    // the prospect's terrain. See docs/games.md -- a restart does not fix it.
+    pattern: /Game Server API initialized 0|FOnlineAsyncTaskSteamCreateServer bWasSuccessful: 0/,
+    message: 'Started, but it never registered a session with Steam — it will '
+      + 'not appear in the LAN or internet server browser until it is restarted. '
+      + 'Check Icarus.log for "Game Server API initialized 0" (query port taken) '
+      + 'or "FOnlineAsyncTaskSteamCreateServer bWasSuccessful: 0" (Steam did not answer)',
+  },
+
   setupNotes: [
     'The name players see in the server browser comes from -SteamServerName= on',
     'the command line, not from SessionName in ServerSettings.ini. Without the',

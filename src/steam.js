@@ -13,6 +13,7 @@
 // politeness — it is the part that makes the update possible at all.
 import fs from 'node:fs';
 import path from 'node:path';
+import { runCommands } from './win.js';
 
 // --- tunables ---------------------------------------------------------------
 
@@ -162,6 +163,12 @@ export class SteamUpdates {
     this.checkMinutes = config.steam?.checkMinutes ?? 360;
     this.waitMinutes = config.steam?.waitMinutes ?? 60;
     this.library = config.steam?.library ?? null;
+    // Path to steamcmd.exe. Present means the dashboard can install an update
+    // itself; absent means it can only stop the server and wait for you.
+    this.steamcmd = config.steam?.steamcmd ?? null;
+    // A cold 9 GB download is not a 5-minute job, and the default runCommands
+    // timeout would kill it half-written.
+    this.updateTimeoutMinutes = config.steam?.updateTimeoutMinutes ?? 60;
     // A wait outlives a dashboard restart: the server is stopped and nothing
     // else is going to start it again.
     this.waitFile = path.join(dataDir, 'steam-waits.json');
@@ -188,6 +195,77 @@ export class SteamUpdates {
 
   managed(id) {
     return Boolean(this.manifestFor(id));
+  }
+
+  // Where the app's files actually live. Two layouts have to be told apart:
+  // a normal Steam library puts them in <lib>\common\<installdir>, while a
+  // SteamCMD install made with +force_install_dir puts them straight in the
+  // folder whose steamapps\ holds the manifest. An explicit steamInstallDir
+  // on the target wins over both.
+  installDirFor(id) {
+    const t = this.config.targets.find((x) => x.id === id);
+    if (!t) return null;
+    if (t.steamInstallDir) return t.steamInstallDir;
+
+    const file = this.manifestFor(id);
+    if (!file) return null;
+    const steamapps = path.dirname(file);
+
+    let installDir = null;
+    try { installDir = readManifest(file).installDir; } catch { /* fall through */ }
+    if (installDir) {
+      const inLibrary = path.join(steamapps, 'common', installDir);
+      if (fs.existsSync(inLibrary)) return inLibrary;
+    }
+    // force_install_dir layout: the manifest sits in <root>\steamapps.
+    const root = path.dirname(steamapps);
+    return fs.existsSync(root) ? root : null;
+  }
+
+  // Auto-update is opt-in per target and needs a steamcmd to drive. Without
+  // both, begin() falls back to stopping the server and waiting for a human.
+  canAutoUpdate(id) {
+    const t = this.config.targets.find((x) => x.id === id);
+    if (!t?.autoUpdate || !t.steamAppId) return false;
+    if (!this.steamcmd || !fs.existsSync(this.steamcmd)) return false;
+    return Boolean(this.installDirFor(id));
+  }
+
+  // Run the install. SteamCMD's exit code is not trustworthy here -- it exits 7
+  // on the self-relaunch it performs after updating itself, with the app update
+  // having succeeded -- so success is judged the same way check() judges it:
+  // by the build id the manifest ends up holding.
+  async applyUpdate(id, expectedBuild = null) {
+    const t = this.target(id);
+    const dir = this.installDirFor(id);
+    if (!this.steamcmd || !fs.existsSync(this.steamcmd)) {
+      return { ok: false, error: 'no steamcmd configured (set steam.steamcmd)' };
+    }
+    if (!dir) return { ok: false, error: 'could not work out where this app is installed' };
+
+    const q = (v) => `'${String(v).replace(/'/g, "''")}'`;
+    const command = `& ${q(this.steamcmd)} +force_install_dir ${q(dir)} `
+      + `+login anonymous +app_update ${t.steamAppId} validate +quit`;
+
+    this.#set(id, { phase: 'installing' });
+    this.monitor.addAlert('info', id, `Installing the update with SteamCMD — this can take a while`, CATEGORY);
+
+    const res = await runCommands(command, null, this.updateTimeoutMinutes * 60_000);
+
+    // Judge by the manifest, not by res.ok.
+    let installed = null;
+    const file = this.manifestFor(id);
+    if (file) {
+      try { installed = readManifest(file).buildId; } catch { /* leave null */ }
+    }
+    const done = expectedBuild ? installed === expectedBuild : Boolean(installed) && res.ok;
+    if (!done) {
+      const why = res.ok
+        ? `SteamCMD finished but the build is still ${installed ?? 'unknown'}`
+        : res.error;
+      return { ok: false, error: why, installed, out: res.out };
+    }
+    return { ok: true, installed, out: res.out };
   }
 
   #set(id, patch) {
@@ -295,6 +373,46 @@ export class SteamUpdates {
       if (!backup.ok) {
         this.monitor.addAlert('warn', id, `Pre-update backup failed, still waiting for the update: ${backup.error}`, 'backup');
       }
+    }
+
+    // With a steamcmd to drive, there is nothing to wait for: install the build
+    // and bring the server back. The blackout taken above is still held, so the
+    // download minutes do not read as an outage or wake the watchdog.
+    if (this.canAutoUpdate(id)) {
+      const applied = await this.applyUpdate(id, result.latest)
+        .catch((err) => ({ ok: false, error: err.message }));
+
+      if (!applied.ok) {
+        // The files are in whatever state SteamCMD left them, and leaving the
+        // server down on a half-written install helps nobody -- fall back to the
+        // manual wait, which is watching the manifest anyway and will start the
+        // server the moment the build id changes.
+        this.monitor.addAlert('error', id,
+          `Automatic update failed (${applied.error}) — waiting for you to update it in Steam instead`,
+          CATEGORY);
+        this.#beginWait(id, { installedBefore: result.installed, deadline: Date.now() + this.waitMinutes * 60_000 });
+        return { ok: false, error: applied.error, updateAvailable: true, waiting: true };
+      }
+
+      this.monitor.addAlert('info', id,
+        `Updated to build ${applied.installed} — starting the server`, CATEGORY);
+      this.#set(id, { phase: 'starting' });
+
+      const started = await this.actions.start(id).catch((err) => ({ ok: false, error: err.message }));
+      this.monitor.suppress(id, false);
+      this.#set(id, { phase: 'idle', installed: applied.installed, latest: result.latest, updateAvailable: false });
+      if (!started.ok) {
+        this.monitor.addAlert('error', id, `Updated, but the server would not start: ${started.error}`, CATEGORY);
+      }
+      return {
+        ok: true,
+        updateAvailable: true,
+        applied: true,
+        installed: applied.installed,
+        latest: result.latest,
+        backup: backup?.file ?? null,
+        started: started.ok,
+      };
     }
 
     this.#beginWait(id, { installedBefore: result.installed, deadline: Date.now() + this.waitMinutes * 60_000 });
@@ -461,6 +579,33 @@ export class SteamUpdates {
       if (!this.managed(t.id) || this.waits.has(t.id)) continue;
       const res = await this.check(t.id).catch(() => null);
       if (!res?.ok || !res.updateAvailable) continue;
+
+      // Applying an update means stopping the server, and for a game with no
+      // remote interface that stop is a kill with no warning to anyone standing
+      // in it. So an automatic update waits for an empty server; a populated one
+      // is left alone and picked up by a later sweep. Only a confirmed zero
+      // counts -- an unknown player list is not an empty one.
+      if (this.canAutoUpdate(t.id)) {
+        const online = this.monitor.state.get(t.id)?.players?.length ?? null;
+        if (online === 0) {
+          this.#set(t.id, { notified: res.latest });
+          this.monitor.addAlert('info', t.id,
+            `Steam build ${res.latest} is available and nobody is online — updating now`, CATEGORY);
+          await this.begin(t.id).catch((err) => {
+            this.monitor.addAlert('error', t.id, `Automatic update failed: ${err.message}`, CATEGORY);
+          });
+          continue;
+        }
+        if (this.state.get(t.id)?.notified === res.latest) continue;
+        this.#set(t.id, { notified: res.latest });
+        this.monitor.addAlert('warn', t.id,
+          `Steam update available — build ${res.latest} (running ${res.installed}). `
+          + `${online === null ? 'Player count is unknown' : `${online} player(s) online`}, `
+          + `so it will be installed automatically once the server is empty.`,
+          CATEGORY);
+        continue;
+      }
+
       if (this.state.get(t.id)?.notified === res.latest) continue;
       this.#set(t.id, { notified: res.latest });
       this.monitor.addAlert('warn', t.id,

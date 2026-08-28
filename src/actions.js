@@ -41,6 +41,7 @@ export class Actions {
     this.config = config;
     this.monitor = monitor;
     this.pending = new Map(); // id -> {timers, finishAt, reason}
+    this.starting = new Map(); // id -> ms timestamp of an unconfirmed launch
     this.backups = null;      // set by server.js; Backups needs Actions too
     this.shutdownGraceSeconds = config.restart?.graceSeconds ?? DEFAULT_SHUTDOWN_GRACE_SECONDS;
   }
@@ -129,11 +130,43 @@ export class Actions {
     }
     const snap = this.monitor.state.get(id);
     if (snap?.up) return { ok: false, error: 'already running' };
+
+    // The snapshot alone is not a safe guard. A cold Icarus map load takes two
+    // minutes to answer a query, so for that whole window `up` is false and a
+    // second click launches a second copy on top of the first. Both bind 17777,
+    // the loser dies silently, and the survivor is a server nobody can find.
+    // So: refuse a start while an unconfirmed one is still within its warm-up.
+    const inFlight = this.starting.get(id);
+    if (inFlight && Date.now() - inFlight < this.startWindow(t)) {
+      return { ok: false, error: 'a start is already in progress' };
+    }
+
+    // And ask the process table rather than the poller, which is up to one
+    // interval stale — the same lag that lets a double-start through.
+    if (t.processName) {
+      const stats = await getProcessStats([t.processName]).catch(() => ({}));
+      if (stats[t.processName]?.running) {
+        this.starting.delete(id);
+        return { ok: false, error: 'already running' };
+      }
+    }
+
+    this.starting.set(id, Date.now());
     this.monitor.suppress(id, true);
     setTimeout(() => this.monitor.suppress(id, false), SUPPRESS_START_MS).unref?.();
     const res = launchDetached(t.startCommand);
     if (res.ok) this.monitor.addAlert('info', id, 'Start requested from dashboard', 'restart');
+    else this.starting.delete(id);
     return res;
+  }
+
+  // How long a launch stays "in flight" before another start is allowed again.
+  // readyAfterSeconds is the game's own estimate of time-to-first-answer; the
+  // fallback matches the alert blackout.
+  startWindow(t) {
+    const profile = t.game ? getProfile(t.game) : null;
+    const secs = t.readyAfterSeconds ?? profile?.defaults?.readyAfterSeconds;
+    return secs ? secs * 1000 : SUPPRESS_START_MS;
   }
 
   // Save first, ask the server to exit, then make sure it actually died.
@@ -145,6 +178,7 @@ export class Actions {
       return controlService(t.serviceName, 'stop', t.nssm);
     }
 
+    this.starting.delete(id);
     this.monitor.suppress(id, true);
     const profile = getProfile(t.game);
 
