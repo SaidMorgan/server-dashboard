@@ -586,7 +586,7 @@ export class SteamUpdates {
       // is left alone and picked up by a later sweep. Only a confirmed zero
       // counts -- an unknown player list is not an empty one.
       if (this.canAutoUpdate(t.id)) {
-        const online = this.monitor.state.get(t.id)?.players?.length ?? null;
+        const online = this.monitor.state.get(t.id)?.playerCount ?? null;
         if (online === 0) {
           this.#set(t.id, { notified: res.latest });
           this.monitor.addAlert('info', t.id,

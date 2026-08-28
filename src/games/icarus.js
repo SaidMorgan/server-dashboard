@@ -1,11 +1,16 @@
 // Icarus.
 //
-// No RCON, no REST, no console — RocketWerkz exposes nothing to talk to a
-// running server with, so this is a monitor-and-control-the-process profile in
-// the same family as valheim.js: up/down, uptime, CPU, RAM, history, crash
-// alerts, the watchdog, backups and scheduled restarts all work; the player list
-// and broadcasts do not, and the UI hides those rather than offering buttons
-// that can only fail.
+// No RCON, no REST, no console — RocketWerkz exposes nothing to *talk to* a
+// running server with, so this is a monitor-and-control-the-process profile:
+// up/down, uptime, CPU, RAM, history, crash alerts, the watchdog, backups and
+// scheduled restarts all work; broadcasts and a clean remote shutdown do not,
+// and the UI hides those rather than offering buttons that can only fail.
+//
+// It can still be *read*, though. Icarus registers with Steam and answers
+// A2S_INFO on its query port, which is where the player count on the card comes
+// from — see src/a2s.js. That count is what makes "update while nobody is
+// online" and "skip the shutdown warning, the server is empty" real decisions
+// here instead of guesses.
 //
 // Administration happens in-game instead. A player whose Steam ID is in
 // AdminPassword's ini section gets the server console with `\` — that is the
@@ -15,6 +20,15 @@ export default {
   id: 'icarus',
   label: 'Icarus',
   transport: 'none',
+
+  // A2S_INFO gives the count; A2S_PLAYER does not give names. Icarus answers it
+  // with the right number of entries and an empty string in every name field,
+  // so asking costs a second UDP round trip every poll and returns nothing the
+  // count did not already say. The card shows "N online" without a list.
+  query: {
+    protocol: 'a2s',
+    names: false,
+  },
 
   defaults: {
     // Both UDP. The query port is a real Steam game server query port, not

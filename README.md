@@ -429,9 +429,9 @@ sc query ServerDashboard
 
 | | |
 |---|---|
-| Status dot | green = healthy, amber = running but RCON/health failing, red = down |
-| Stats | uptime, CPU, RAM, RCON state, port |
-| Players | live names, or "nobody online — safe to restart" |
+| Status dot | green = healthy, amber = running but RCON/query/health failing, red = down |
+| Stats | uptime, CPU, RAM, RCON or Steam-query state, port |
+| Players | live names, a count for games that only answer Steam queries (Icarus), or "nobody online — safe to restart" |
 | Controls | Start / Restart / Stop / Save world |
 | Warn & restart | broadcasts at 15/10/5/1 min, then restarts. Cancellable |
 | Broadcast | send a message to everyone in-game |

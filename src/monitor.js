@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { rconCommand, getClient } from './rcon.js';
+import { queryInfo, queryPlayers } from './a2s.js';
 import { getProfile } from './games/index.js';
 import { getProcessStats, getServiceState, getServiceProcess, checkHealth, toast } from './win.js';
 
@@ -143,7 +144,7 @@ export class Monitor {
       rows.push({
         t: now,
         up: snap.up ? 1 : 0,
-        players: snap.players?.length ?? null,
+        players: snap.playerCount ?? null,
         cpu: snap.cpu ?? null,
         memMB: snap.memMB ?? null,
         ms: snap.responseMs ?? null,
@@ -167,7 +168,17 @@ export class Monitor {
     return Math.round((used / elapsed / this.cores) * 1000) / 10;
   }
 
+  // Everything downstream — the badge, the history graph, "is it safe to update"
+  // — wants one number, so the two ways of arriving at it (a parsed player list,
+  // or a Steam query that only ever returns a count) are reconciled in one place
+  // rather than at each call site.
   async #pollGame(target, proc) {
+    const snap = await this.#pollGameState(target, proc);
+    if (snap.playerCount == null) snap.playerCount = snap.players?.length ?? null;
+    return snap;
+  }
+
+  async #pollGameState(target, proc) {
     const profile = getProfile(target.game);
     const running = Boolean(proc?.running);
     const snap = {
@@ -183,7 +194,10 @@ export class Monitor {
       maxPlayers: target.maxPlayers,
       gamePort: target.gamePort,
       rconPort: target.rconPort,
+      queryPort: profile.query ? (target.queryPort ?? null) : null,
       players: null,
+      playerCount: null,
+      query: profile.query ? 'unknown' : 'n/a',
       rcon: 'unknown',
       checkedAt: Date.now(),
     };
@@ -195,8 +209,16 @@ export class Monitor {
       snap.logHealthError = this.#checkLogHealth(target, profile.logHealth, proc);
     }
 
-    // Games with no query interface at all (Valheim, "process"): the process
-    // table is the whole story, so stop here rather than reporting a broken RCON.
+    // A Steam query is independent of the control transport: it needs no
+    // password and no session, so it is worth asking whether or not the game
+    // also speaks RCON. For a transport:'none' game it is the only thing on the
+    // card that is not read out of the process table.
+    if (profile.query && target.queryPort) {
+      await this.#pollQuery(target, profile, snap, running);
+    }
+
+    // Games with no control interface at all (Valheim, "process"): there is
+    // nothing to connect to, so stop here rather than reporting a broken RCON.
     if (profile.transport === 'none') {
       snap.rcon = 'n/a';
       snap.control = null;
@@ -258,6 +280,50 @@ export class Monitor {
       snap.rconError = res.error;
     }
     return snap;
+  }
+
+  // A2S over UDP. Failure here is never fatal to the snapshot: a query that
+  // does not answer costs the player count, and everything read from the
+  // process table stands on its own.
+  async #pollQuery(target, profile, snap, running) {
+    if (!running) {
+      snap.query = 'offline';
+      return;
+    }
+
+    // A loading server has not registered with Steam yet, so the query times out
+    // for exactly as long as the start takes. Reporting that as an error would
+    // put every card into a warning state for the first two minutes of every
+    // restart, which is the one time somebody is definitely watching it.
+    if (target.readyAfterSeconds && snap.startedAt) {
+      const ageSeconds = (Date.now() - new Date(snap.startedAt).getTime()) / 1000;
+      if (ageSeconds < target.readyAfterSeconds) {
+        snap.query = 'starting';
+        return;
+      }
+    }
+
+    const info = await queryInfo({ host: target.host, port: target.queryPort });
+    if (!info.ok) {
+      snap.query = 'error';
+      snap.queryError = info.error;
+      return;
+    }
+
+    snap.query = 'ok';
+    snap.playerCount = info.players;
+    snap.responseMs = info.ms;
+    snap.serverName = info.name || null;
+    // A server that reports its own limit is a better source than a hand-typed
+    // maxPlayers, but only when the config left it out — an admin who wrote a
+    // number there gets to keep it.
+    if (snap.maxPlayers == null) snap.maxPlayers = info.maxPlayers;
+
+    // Only when the game actually fills in the name field. The rest answer with
+    // one blank entry per player, which is a list of nobody.
+    if (!profile.query.names || info.players === 0) return;
+    const list = await queryPlayers({ host: target.host, port: target.queryPort });
+    if (list.ok) snap.players = list.players;
   }
 
   async #pollService(target) {
@@ -326,8 +392,23 @@ export class Monitor {
     if (snap.kind === 'game' && prev.rcon === 'ok' && snap.rcon === 'error') {
       this.addAlert('warn', snap.id, `RCON stopped responding: ${snap.rconError}`);
     }
+    // Worth saying out loud even though the process is alive: a server that has
+    // stopped answering Steam is a server nobody can find in the browser.
+    if (snap.kind === 'game' && prev.query === 'ok' && snap.query === 'error') {
+      this.addAlert('warn', snap.id, `Steam query stopped responding: ${snap.queryError}`);
+    }
     if (snap.kind === 'service' && prev.healthy && !snap.healthy && snap.serviceStatus === 'Running') {
       this.addAlert('warn', snap.id, `Health check failing (${snap.healthError || snap.httpStatus}) while the service still runs`);
+    }
+
+    // Games that only report a count get the same feed without the names — it
+    // is still the difference between "someone is on it" and "it is idle".
+    if (snap.kind === 'game' && !snap.players && snap.playerCount != null
+        && prev.playerCount != null && prev.playerCount !== snap.playerCount) {
+      const n = snap.playerCount;
+      this.addAlert('info', snap.id, n > prev.playerCount
+        ? `Player joined — ${n} online`
+        : (n === 0 ? 'Last player left — server is empty' : `Player left — ${n} online`));
     }
 
     // Player joins/leaves, so the activity feed shows who is actually around.

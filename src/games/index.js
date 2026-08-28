@@ -21,6 +21,11 @@ import processOnly from './process.js';
 
 export const TRANSPORTS = ['rcon-persistent', 'rcon-oneshot', 'rest', 'none'];
 
+// Read-only ways to ask a running server how many players are on it, which is
+// a different axis from transport: a game can have no control channel at all
+// and still answer Steam queries. See src/a2s.js.
+export const QUERY_PROTOCOLS = ['a2s'];
+
 const registry = new Map();
 
 function register(profile, origin) {
@@ -45,6 +50,7 @@ function register(profile, origin) {
     consoleCommands: [],
     rest: null,
     restVerbs: null,
+    query: null,
     verbAliases: {},
     setupNotes: '',
     parsePlayers: () => [],
@@ -52,6 +58,18 @@ function register(profile, origin) {
     ...profile,
     origin: origin || 'built-in',
   };
+
+  // A query protocol is opt-in per profile and needs a queryPort on the target
+  // to aim at; config.js checks for that.
+  if (normalized.query) {
+    const protocol = normalized.query.protocol;
+    if (!QUERY_PROTOCOLS.includes(protocol)) {
+      throw new Error(
+        `game profile "${profile.id}"${where} has query protocol "${protocol}"; ` +
+        `expected one of ${QUERY_PROTOCOLS.join(', ')}`,
+      );
+    }
+  }
 
   // A profile that can read players must be able to parse them.
   if (normalized.transport.startsWith('rcon') && typeof normalized.parsePlayers !== 'function') {

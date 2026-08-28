@@ -107,7 +107,10 @@ function buildCard(target) {
   if (!caps.canSteamUpdate) hide('[data-act=steamUpdate]');
   if (caps.hasBackup === false) hide('.backups');
   if (caps.hasLog === false) hide('.logs');
-  if (caps.transport === 'none') hide('.players-list');
+  // Hidden only when there is genuinely nothing to show. A game with no control
+  // transport still gets the panel if it answers Steam queries — the count is
+  // the point of the card for those.
+  if (caps.transport === 'none' && !caps.hasQuery) hide('.players-list');
 
   node.querySelector('.popout').addEventListener('click', () => {
     window.open(`${location.pathname}?only=${target.id}`, `panel_${target.id}`,
@@ -508,6 +511,13 @@ function statTiles(snap) {
     tiles.push(['RCON', snap.rcon === 'ok' ? 'connected' : (snap.rconError || snap.rcon),
       snap.rcon === 'ok' ? 'good' : (snap.up ? 'warn' : '')]);
   }
+  // For a query-only game this tile is the honest equivalent: it says whether
+  // the number above it is current, and it is the first thing to go when a
+  // server is running but has fallen out of the Steam browser.
+  if (snap.query && snap.query !== 'n/a') {
+    tiles.push(['Steam query', snap.query === 'ok' ? 'answering' : (snap.queryError || snap.query),
+      snap.query === 'ok' ? 'good' : (snap.up && snap.query !== 'starting' ? 'warn' : '')]);
+  }
   tiles.push(['Port', String(snap.gamePort ?? '—'), '']);
   return tiles;
 }
@@ -517,19 +527,22 @@ function render(snap, pending, updates) {
   if (!node) return;
 
   const players = snap.players;
-  const count = players ? players.length : null;
+  const count = snap.playerCount ?? (players ? players.length : null);
   node.dataset.playerCount = count ?? 0;
 
   // Status dot: green = up, amber = up but RCON/health unhappy, red = down.
   const dot = node.querySelector('.card-head .dot');
   const degraded = snap.up && (
     (snap.kind === 'game' && snap.rcon !== 'ok' && snap.rcon !== 'n/a')
+    // A query that is merely 'starting' is a server still loading, not a sick
+    // one — the same grace the RCON games already get from readyAfterSeconds.
+    || (snap.kind === 'game' && snap.query === 'error')
     || (snap.kind === 'service' && !snap.healthy));
   dot.className = `dot ${!snap.up ? 'down' : degraded ? 'degraded' : 'up'}`;
 
   const badge = node.querySelector('.badge.players');
   if (snap.kind === 'game') {
-    badge.textContent = snap.rcon === 'n/a'
+    badge.textContent = (snap.rcon === 'n/a' && count == null)
       ? (snap.up ? 'running' : 'stopped')
       : (count == null ? '— / —' : `${count} / ${snap.maxPlayers}`);
     badge.classList.toggle('active', Boolean(count));
@@ -545,10 +558,19 @@ function render(snap, pending, updates) {
   if (snap.kind === 'service') {
     node.querySelector('.players-list').classList.add('hidden');
     renderServiceInfo(node, snap);
-  } else if (snap.rcon === 'n/a') {
+  } else if (snap.rcon === 'n/a' && snap.query === 'n/a') {
     // handled by hiding the section at build time
+  } else if (!players && count != null) {
+    // A count with no names: the game answers Steam's query but does not publish
+    // who is on it. Say the number rather than pretending the list is empty.
+    list.innerHTML = count === 0
+      ? '<li class="empty">nobody online — safe to restart</li>'
+      : `<li class="empty">${count} player(s) online — this game does not publish names</li>`;
   } else if (!players) {
-    list.innerHTML = `<li class="empty">${snap.up ? 'RCON unavailable — cannot read player list' : 'server offline'}</li>`;
+    const why = snap.query === 'starting' ? 'still starting — no player count yet'
+      : snap.rcon === 'n/a' ? 'Steam query unavailable — cannot read the player count'
+      : 'RCON unavailable — cannot read player list';
+    list.innerHTML = `<li class="empty">${snap.up ? why : 'server offline'}</li>`;
   } else if (!players.length) {
     list.innerHTML = '<li class="empty">nobody online — safe to restart</li>';
   } else {

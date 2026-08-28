@@ -81,6 +81,12 @@ const publicTarget = (t) => {
     canBroadcast: Boolean(profile && (profile.transport === 'rest' || profile.commands?.broadcast)),
     canSave: Boolean(profile && (profile.transport === 'rest' || profile.commands?.save)),
     canConsole: Boolean(profile && profile.transport !== 'none'),
+    // A game with no control transport can still have a readable player count
+    // (Icarus answers Steam queries), so the players panel is not tied to RCON.
+    hasQuery: Boolean(profile?.query && t.queryPort),
+    // ...but a count with no names is a number, not a list, and the panel says
+    // so instead of rendering an empty one.
+    hasPlayerNames: Boolean(profile && (profile.transport !== 'none' || profile.query?.names)),
     consoleCommands: profile?.consoleCommands ?? [],
     canStart: Boolean(t.startCommand) || t.kind === 'service',
     canUpdate: t.kind === 'service' && Boolean(t.preRestartCommand),
@@ -89,6 +95,7 @@ const publicTarget = (t) => {
     // instead of one that can only ever explain why it doesn't work.
     canSteamUpdate: steam.managed(t.id),
     gamePort: t.gamePort ?? null, rconPort: t.rconPort ?? null,
+    queryPort: t.queryPort ?? null,
     maxPlayers: t.maxPlayers ?? null, serviceName: t.serviceName ?? null,
     healthUrl: t.healthUrl ?? null, hasLog: Boolean(t.logFile || t.logDir),
     hasBackup: Boolean(t.backup?.enabled && t.backup?.paths?.length),

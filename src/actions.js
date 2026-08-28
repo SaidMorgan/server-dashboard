@@ -204,7 +204,7 @@ export class Actions {
     // for an empty server is a minute of watching a server that could already be
     // down. An unknown player list — RCON not answering — is not an empty one,
     // so only a confirmed zero skips the wait.
-    const online = this.monitor.state.get(id)?.players?.length ?? null;
+    const online = this.monitor.state.get(id)?.playerCount ?? null;
     const countdown = online === 0 ? 0 : (t.shutdownCountdownSeconds ?? 0);
 
     if (announce) {

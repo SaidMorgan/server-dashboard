@@ -408,6 +408,13 @@ function validateTarget(t, i, seen, errors) {
     errors.push(`${at}.steamLibrary: set without steamAppId, so nothing would ever look in it`);
   }
 
+  // Filled in from the profile's defaults for a stock setup; only a target that
+  // explicitly cleared it can get here.
+  if (profile.query) {
+    check(errors, isNum(t.queryPort),
+      `${at}.queryPort: required for ${profile.label} — it is how the player count is read`);
+  }
+
   if (profile.transport === 'rest') {
     check(errors, isNum(t.restPort), `${at}.restPort: required for ${profile.label}`);
     check(errors, isStr(t.adminPassword),
