@@ -36,6 +36,12 @@ const SAVE_FLUSH_MS = 3000;          // let a save reach disk before asking to e
 const RESTART_GAP_MS = 5000;         // pause between the process dying and relaunch
 const STOP_POLL_MS = 3000;           // how often to check whether it exited yet
 
+// How often "restart when empty" re-reads the player count. It reads the
+// monitor's own snapshot rather than querying the server, so this is free —
+// keeping it well under the poll interval just means the restart lands promptly
+// after the last player leaves instead of up to a poll late.
+const EMPTY_POLL_MS = 5000;
+
 export class Actions {
   constructor(config, monitor) {
     this.config = config;
@@ -412,19 +418,84 @@ export class Actions {
     return { ok: true, finishAt };
   }
 
+  // Restart at the first moment nobody is on, giving up after maxMinutes.
+  //
+  // The counterpart to scheduleRestart for a server that cannot warn anyone. A
+  // fixed countdown assumes the warning lands; Icarus has no channel to send one
+  // down, so a 15-minute timer there is just a promise to kill whoever is still
+  // playing in 15 minutes. Waiting for empty is the version of "restart soon"
+  // that is honest about that — and it is the better option even for a game that
+  // can broadcast, whenever the restart is housekeeping rather than urgent.
+  //
+  // Nothing happens if the server never empties: the deadline cancels the watch
+  // rather than restarting anyway, because "when nobody is online" is the whole
+  // instruction and a timeout is not permission to break it.
+  restartWhenEmpty(id, maxMinutes = 60, reason = 'restart when empty') {
+    const t = this.target(id);
+    if (t.kind !== 'game') return { ok: false, error: 'only game servers have a player count' };
+    if (this.pending.has(id)) return { ok: false, error: 'a restart is already scheduled' };
+
+    // A server whose player count cannot be read can never be confirmed empty,
+    // and silently waiting forever on that is worse than refusing now.
+    const snap = this.monitor.state.get(id);
+    if (snap?.playerCount == null) {
+      return { ok: false, error: 'the player count for this server cannot be read right now, so "empty" is unknowable' };
+    }
+
+    const finishAt = Date.now() + maxMinutes * 60_000;
+    const fire = async () => {
+      const p = this.pending.get(id);
+      if (!p) return;
+      clearInterval(p.interval);
+      p.timers.forEach(clearTimeout);
+      this.pending.delete(id);
+      this.monitor.addAlert('info', id, 'Server is empty — restarting now', 'restart');
+      await this.restartNow(id);
+    };
+
+    const interval = setInterval(() => {
+      const now = this.monitor.state.get(id);
+      // A server that went down on its own has nothing to restart, and treating
+      // "no players because it crashed" as "empty, go ahead" would race the
+      // watchdog for the same process.
+      if (!now?.up) return;
+      if (now.playerCount === 0) fire();
+    }, EMPTY_POLL_MS);
+    interval.unref?.();
+
+    const giveUp = setTimeout(() => {
+      const p = this.pending.get(id);
+      if (!p) return;
+      clearInterval(p.interval);
+      this.pending.delete(id);
+      this.monitor.addAlert('warn', id,
+        `Still had players after ${maxMinutes} minute(s) — the restart was NOT performed. `
+        + 'Use "Warn & restart" if it needs to happen regardless.',
+        'restart');
+    }, maxMinutes * 60_000);
+
+    this.pending.set(id, { timers: [giveUp], interval, finishAt, reason, mode: 'empty' });
+    this.monitor.addAlert('info', id,
+      `Waiting for the server to empty, then restarting (giving up after ${maxMinutes} minute(s))`,
+      'restart');
+    return { ok: true, finishAt, mode: 'empty' };
+  }
+
   cancelRestart(id) {
     const p = this.pending.get(id);
     if (!p) return { ok: false, error: 'nothing scheduled' };
     p.timers.forEach(clearTimeout);
+    clearInterval(p.interval);
     this.pending.delete(id);
-    this.broadcast(id, 'Restart cancelled').catch(() => {});
+    // Nobody was told it was coming, so there is nobody to tell it is off.
+    if (p.mode !== 'empty') this.broadcast(id, 'Restart cancelled').catch(() => {});
     this.monitor.addAlert('info', id, 'Scheduled restart cancelled', 'restart');
     return { ok: true };
   }
 
   pendingInfo() {
     return Object.fromEntries(
-      [...this.pending].map(([id, p]) => [id, { finishAt: p.finishAt, reason: p.reason }]),
+      [...this.pending].map(([id, p]) => [id, { finishAt: p.finishAt, reason: p.reason, mode: p.mode ?? 'countdown' }]),
     );
   }
 }

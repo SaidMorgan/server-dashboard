@@ -13,6 +13,7 @@ import { pathToFileURL } from 'node:url';
 import ark from './ark.js';
 import palworld from './palworld.js';
 import minecraft from './minecraft.js';
+import bedrock from './bedrock.js';
 import sevenDaysToDie from './7dtd.js';
 import source from './source.js';
 import valheim from './valheim.js';
@@ -23,8 +24,11 @@ export const TRANSPORTS = ['rcon-persistent', 'rcon-oneshot', 'rest', 'none'];
 
 // Read-only ways to ask a running server how many players are on it, which is
 // a different axis from transport: a game can have no control channel at all
-// and still answer Steam queries. See src/a2s.js.
-export const QUERY_PROTOCOLS = ['a2s'];
+// and still answer the question its own client asks to draw a server list.
+// 'a2s' is the Steam query (src/a2s.js); 'raknet' is the Bedrock unconnected
+// ping (src/raknet.js). Adding one means teaching src/monitor.js to dispatch
+// on it, so this list is deliberately not open to user profiles.
+export const QUERY_PROTOCOLS = ['a2s', 'raknet'];
 
 const registry = new Map();
 
@@ -96,7 +100,7 @@ function register(profile, origin) {
   return normalized;
 }
 
-for (const p of [ark, palworld, minecraft, sevenDaysToDie, source, valheim, icarus, processOnly]) {
+for (const p of [ark, palworld, minecraft, bedrock, sevenDaysToDie, source, valheim, icarus, processOnly]) {
   register(p);
 }
 

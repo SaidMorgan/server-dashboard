@@ -197,6 +197,23 @@
         "modsDir": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\PalServer\\Mods\\ManagedMods"
       },
 
+      // Optional, and separate from the block above. workshopMods answers "is an
+      // update waiting?", which by design says nothing while everything is
+      // current. This is where the card's Mods panel looks for the standing
+      // list of what is installed -- and it works for games that have no Steam
+      // Workshop to compare against at all.
+      //
+      // Most games find this from their own profile, so you only need it when
+      // your install is laid out differently. "kind" is "workshop" for one
+      // folder per mod each with an InstallManifest.json, or "paks" for loose
+      // Unreal .pak files. Read-only either way: nothing installs, enables or
+      // removes a mod.
+      //
+      // "mods": {
+      //   "dir": "C:\\GameServers\\IcarusServer\\Icarus\\Mods",
+      //   "kind": "paks"
+      // },
+
       "backup": {
         "enabled": true,
         "paths": ["C:\\Program Files (x86)\\Steam\\steamapps\\common\\PalServer\\Pal\\Saved\\SaveGames"],

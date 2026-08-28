@@ -8,6 +8,7 @@ the server, what its commands are called, and how to read its player list.
 | `ark` | RCON, one persistent socket | yes | yes | Read the ARK section. It has traps |
 | `palworld` | REST API | yes (+ ping, level) | yes | RCON is deprecated upstream |
 | `minecraft` | RCON | yes | yes | `processName` is `java` — see below |
+| `bedrock` | none | count only | no | Minecraft Bedrock. No RCON exists; the count comes from the RakNet ping |
 | `7dtd` | RCON, per command | yes | yes | RCON password is the telnet password |
 | `source` | RCON, per command | yes | yes | Generic Source engine |
 | `valheim` | none | no | no | Vanilla exposes no remote interface |
@@ -198,6 +199,42 @@ them independently of build updates, and each mod is announced once per
 published version rather than once per sweep. `steam.checkMinutes` governs the
 game build sweep; `workshop.checkMinutes` (default 360) governs this one.
 
+### The Mods panel lists what is installed
+
+The banner above is an alert: by design it says nothing at all while every mod
+is current, which is most of the time. The **Mods** panel on the card is the
+other half — the standing answer to "what is this server actually running?" —
+and it is read on demand from disk rather than polled.
+
+Per mod it shows the name, `Version` and `Author` from the mod's own `Info.json`,
+its size on disk, when it was installed, its dependencies, and a flag when it is
+in a state that needs a decision:
+
+| Flag | Meaning |
+| --- | --- |
+| update waiting | Steam has a newer copy — the `stale` state above |
+| not subscribed | no subscription left to update from |
+| not loaded | installed, but missing from the game's active mod list |
+
+**"not loaded" is the one worth knowing about.** Installed and enabled are
+different states in Palworld: `Mods\PalModSettings.ini` carries one
+`ActiveModList=` line per *enabled* mod, and the mod manager leaves disabled
+mods in the file as commented-out lines. A mod that is installed, current and
+commented out is fully present on disk and doing nothing, which is the most
+common "why isn't my mod working". The panel reads that file (its location comes
+from the game profile's `mods.enabledFrom`, resolved against `steamInstallDir`)
+and shows the two states apart. `bGlobalEnableMod=False` turns every mod off at
+once while leaving them all listed as active, so that is called out separately
+above the list.
+
+Size is measured from the `Files` array in each `InstallManifest.json`, not from
+the mod's own folder. A UE4SS mod keeps one `Info.json` under `ManagedMods` and
+its actual payload — dlls, Lua, config — under `NativeMods`, so measuring the
+folder it is named after would report a 400-byte mod.
+
+Nothing on this panel writes. Enabling, updating and removing mods stay in the
+mod manager, for the same reason the sweep above only ever raises a flag.
+
 
 ---
 
@@ -215,6 +252,77 @@ rcon.password=your-password
 dashboard can't tell them apart, so **per-process CPU and RAM may report the
 wrong server**. Player counts and RCON control are unaffected, since those go
 over RCON to a specific port.
+
+---
+
+## Minecraft: Bedrock Edition
+
+**A different product from `minecraft`, not a variant of it.** The `minecraft`
+profile speaks Source RCON, and RCON is a *Java Edition* feature. Bedrock
+Dedicated Server has no RCON, no REST and no telnet: its console is stdin on
+`bedrock_server.exe`, and the dashboard starts servers detached (`src/win.js`),
+so there is no pipe to write to. Hence `transport: 'none'` — up/down, uptime,
+CPU, RAM, history, crash alerts, the watchdog, backups and scheduled restarts
+work; broadcasts and a clean remote shutdown do not.
+
+It can still be read. BDS answers the RakNet unconnected ping that the Bedrock
+client sends to draw its server list, and the reply carries the player count and
+the cap — see `src/raknet.js`. That is where the `3 / 10` badge, the history
+graph and "is it safe to restart" come from, exactly as A2S does for Icarus.
+
+**Names are not on the wire at all.** This is stronger than the Icarus case: A2S
+at least has an `A2S_PLAYER` packet that Icarus fills with blanks, whereas
+Bedrock has no list packet whatsoever — the ping reply is one string with a
+number in it. The card says "N player(s) online" and the only place names ever
+appear is the server's own console output, which is why the start `.bat`
+redirects stdout to a log worth tailing.
+
+### The port is the same number twice, and it is UDP
+
+Bedrock answers the ping on the port players connect to, so `gamePort` and
+`queryPort` are both `19132`. Nothing binds twice — the dashboard just sends its
+ping where the clients send theirs. This is the one game here that cannot lose
+the query-port race described below, because there is no separate port to lose.
+
+It is **UDP**. A firewall rule copied from a Java server (TCP 25565) will not
+pass Bedrock traffic, and consoles specifically need UDP 19132 open.
+
+### Stop is a kill, and there is no save-on-exit
+
+The honest limitation. Stop and Restart terminate the process, and unlike Icarus
+— where `SaveGameOnExit=True` is what makes that safe — BDS has no equivalent
+setting. A hard kill can lose recent chunk writes.
+
+So `backup.beforeRestart` is not decoration on this target; it is what stands
+between the 04:30 restart and a world damaged mid-write. Leave it on. If that
+stops being good enough, the fix is a supervisor that holds the server's stdin
+and types `stop` into it, at which point this profile can move to
+`rcon-persistent` and gain a console, broadcasts and a clean shutdown.
+
+`warnMinutes` on a schedule is still honoured by the scheduler, but nobody in
+game sees anything — there is no broadcast channel to send a warning down.
+
+### Updates are a manual unzip
+
+Bedrock is not on Steam and has no app id, so there is no manifest for the build
+check to read and nothing for `steamcmd` to install: no `steamLibrary`, no
+`steamInstallDir`, no `autoUpdate` on this target. An update is a new zip from
+minecraft.net unzipped over the folder. The current build is published at:
+
+```
+https://net-secondary.web.minecraft-services.net/api/v1.0/download/links
+```
+
+Keep `worlds/`, `server.properties`, `allowlist.json` and `permissions.json`
+when you unzip — the archive ships stock copies of all four and will overwrite
+them.
+
+### allow-list is on by default
+
+The shipped `server.properties` has `allow-list=true` with an empty
+`allowlist.json`, so a brand new server refuses everyone and looks exactly like
+a networking fault. BDS warns about it in the log at startup. Either add players
+to `allowlist.json` or set `allow-list=false`.
 
 ---
 
@@ -416,6 +524,48 @@ Stop is safe: the launcher `IcarusServer.exe` exits by itself when the real
 `IcarusServer-Win64-Shipping.exe` is killed, so `processName` should be the
 shipping exe and nothing is orphaned.
 
+### What the card can and cannot do, and why it says so
+
+`transport: none` costs Icarus the broadcast box and the console, and nothing
+can give them back. What it does *not* cost is a delayed restart: "Warn &
+restart" is the dashboard's own timer, not a message sent to the server, so it
+works here — it simply cannot tell anyone it is coming. It used to be hidden
+alongside the broadcast box, which meant the game that most needed a scheduled
+restart was the one game that could not schedule one.
+
+The better button here is **Restart when empty**: it watches the Steam query
+player count and restarts at the first moment nobody is on, giving up after the
+deadline in the minutes box rather than restarting on top of players. On a
+server with no way to warn anyone, a fixed countdown is only a promise to kill
+whoever is still playing in fifteen minutes. It needs a readable player count,
+which is exactly what the query port buys — one more reason it must not lose the
+race for its port.
+
+Where the console and broadcast controls would have been, the card prints the
+profile's `noRemoteNote` instead of leaving a gap, because a card missing half of
+another card's controls reads as broken rather than as a different game.
+
+### Mods
+
+Icarus mods come from mod.io as loose Unreal `.pak` files, not from the Steam
+Workshop, so there is no subscription to compare against and no "an update is
+waiting" to compute — the Mods panel lists what is on disk with its size and
+when it was written. The profile looks in `Icarus\Mods`,
+`Icarus\Content\Paks\~mods` and `Icarus\Content\Paks\mods`, first one that
+exists winning; if none exists the panel says so and names the first, which is
+where they would go. `.utoc`/`.ucas`/`.sig` siblings of a `.pak` are folded into
+one entry, since a mod shipped that way is three files that are one mod.
+
+Override the folder per target if your install differs:
+
+```json
+"mods": { "dir": "C:\GameServers\IcarusServer\Icarus\Mods", "kind": "paks" }
+```
+
+A mod built against an older build can stop the server loading a prospect at
+all, and there is no `validate` to undo it — so if a game update breaks the
+server, this panel is where you find out what is in there.
+
 ---
 
 ## Valheim and `process`
@@ -492,6 +642,32 @@ export default {
 
   // Optional: clean up a reply before it reaches the user.
   normalizeReply: (res) => res,
+
+  // Optional: where this game keeps its mods, for the card's Mods panel. Read
+  // only — nothing here installs, enables or removes anything.
+  //
+  // 'paks'      loose Unreal packages. `candidates` are paths relative to the
+  //             target's steamInstallDir; the first that exists wins, and if
+  //             none exists the first is reported as where they would go.
+  // 'workshop'  one folder per mod, each with an InstallManifest.json, as a
+  //             Steam Workshop mod manager writes them. The folder itself comes
+  //             from the target's workshopMods.modsDir; `enabledFrom` (also
+  //             relative to steamInstallDir) is the game's own list of which
+  //             mods it will actually load, so the panel can tell an installed
+  //             mod from a loaded one. See palworld.js.
+  //
+  // A target can override all of this with its own `mods: { dir, kind }`.
+  mods: {
+    kind: 'paks',
+    candidates: ['MyGame/Mods'],
+    note: 'Anything the panel should say about where these come from.',
+  },
+
+  // Optional, and only meaningful for transport 'none': shown on the card where
+  // the console and broadcast controls would have been. A card that is simply
+  // missing half of another card's controls reads as broken; one line naming the
+  // reason reads as a different game. See icarus.js.
+  noRemoteNote: 'This game has no remote interface, so ...',
 
   setupNotes: 'What the user has to enable server-side.',
 };

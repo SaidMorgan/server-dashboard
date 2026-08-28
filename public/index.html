@@ -74,15 +74,18 @@
           <button data-act="stop" class="btn bad">Stop</button>
           <button data-act="save" class="btn game-only">Save world</button>
         </div>
-        <div class="btnrow game-only">
-          <input class="countdown-min" type="number" min="1" max="120" value="15" title="minutes" />
-          <button data-act="scheduleRestart" class="btn">Warn &amp; restart</button>
+        <div class="btnrow game-only delay-row">
+          <input class="countdown-min" type="number" min="1" max="240" value="15" title="minutes" />
+          <button data-act="scheduleRestart" class="btn" title="Restart after this many minutes, warning players on the way down if this game can">Warn &amp; restart</button>
+          <button data-act="restartWhenEmpty" class="btn" title="Wait until nobody is online, then restart. Gives up after this many minutes rather than restarting on top of players.">Restart when empty</button>
           <button data-act="cancelRestart" class="btn ghost">Cancel</button>
         </div>
         <div class="btnrow game-only">
           <input class="broadcast-msg" type="text" placeholder="Broadcast message to players" />
           <button data-act="broadcast" class="btn">Send</button>
         </div>
+        <div class="action-status"></div>
+        <div class="no-remote hidden"></div>
         <pre class="update-out hidden"></pre>
       </div>
 
@@ -174,6 +177,16 @@
 
         <div class="sched-preview">Pick a schedule above.</div>
         <div class="sched-hint">Times use this machine's clock. Jobs from config.json are read-only here.</div>
+      </details>
+
+      <details class="section mods game-only">
+        <summary>Mods <span class="mods-count"></span></summary>
+        <div class="btnrow">
+          <button class="btn mini-btn mods-refresh">Re-read from disk</button>
+          <span class="mods-status"></span>
+        </div>
+        <ul class="modlist"></ul>
+        <div class="mods-where"></div>
       </details>
 
       <details class="section backups">

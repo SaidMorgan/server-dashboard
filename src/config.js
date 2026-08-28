@@ -441,6 +441,25 @@ function validateTarget(t, i, seen, errors) {
     }
   }
 
+  // An explicit mods folder, for a game whose profile does not guess one or
+  // guesses wrong. Read-only: this only decides where the Mods panel looks. The
+  // workshopMods block above is the separate, narrower thing that compares
+  // installed mods against Steam — a target can have either, both, or neither.
+  if (t.mods !== undefined && t.mods !== null) {
+    const m = t.mods;
+    if (typeof m !== 'object' || Array.isArray(m)) {
+      errors.push(`${at}.mods: expected an object with a dir, e.g. { "dir": "C:\\\\GameServers\\\\X\\\\Mods" }`);
+    } else {
+      check(errors, isStr(m.dir), `${at}.mods.dir: required — the folder the server loads mods from`);
+      if (m.kind !== undefined && !['workshop', 'paks'].includes(m.kind)) {
+        errors.push(
+          `${at}.mods.kind: expected "workshop" (one folder per mod, each with an `
+          + `InstallManifest.json) or "paks" (loose Unreal .pak files); got "${m.kind}"`,
+        );
+      }
+    }
+  }
+
   // Filled in from the profile's defaults for a stock setup; only a target that
   // explicitly cleared it can get here.
   if (profile.query) {

@@ -22,6 +22,26 @@ export default {
     shutdownCountdownSeconds: 60,
   },
 
+  // Where the Mods panel looks. The mod manager installs Steam Workshop items
+  // into Mods\ManagedMods (that folder is named per target, in workshopMods),
+  // but which of them the server actually LOADS is a separate list in
+  // PalModSettings.ini: one ActiveModList= line per enabled mod. A mod that is
+  // installed and current but commented out of that list is the single most
+  // common "my mod isn't working", so the panel reads both and shows the two
+  // states apart. Path is relative to the target's steamInstallDir.
+  mods: {
+    kind: 'workshop',
+    enabledFrom: {
+      // Forward slashes on purpose: path.resolve turns them into a real Windows
+      // path, and a backslash here is one missed escape away from a filename.
+      file: 'Mods/PalModSettings.ini',
+      key: 'ActiveModList',
+      // One master switch below the per-mod list. With it off every mod still
+      // appears in ActiveModList and none of them load.
+      globalKey: 'bGlobalEnableMod',
+    },
+  },
+
   // Verbs the RCON console box accepts for this target, since there is no raw
   // command string to pass through.
   restVerbs: {

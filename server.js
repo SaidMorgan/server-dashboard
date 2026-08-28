@@ -13,6 +13,7 @@ import { Notifier } from './src/notify.js';
 import { Scheduler, describeCron, nextRun } from './src/scheduler.js';
 import { SteamUpdates } from './src/steam.js';
 import { WorkshopMods } from './src/workshop.js';
+import { inventory as modInventory, modSource } from './src/mods.js';
 import { closeAll } from './src/rcon.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -84,6 +85,21 @@ const publicTarget = (t) => {
     canBroadcast: Boolean(profile && (profile.transport === 'rest' || profile.commands?.broadcast)),
     canSave: Boolean(profile && (profile.transport === 'rest' || profile.commands?.save)),
     canConsole: Boolean(profile && profile.transport !== 'none'),
+    // A delayed restart is the dashboard's own timer, so it works for any game
+    // it can start again -- it does not need a way to talk to the server. It
+    // used to be hidden alongside the broadcast box, which meant a game with no
+    // chat channel also lost the ability to schedule a restart at all. What it
+    // loses without broadcast is only the warning, and the card says so.
+    canDelayRestart: Boolean(profile && t.kind === 'game' && t.startCommand),
+    // Restarting at the first empty moment needs a readable player count and
+    // nothing else -- no console, no chat. It is the only "restart soon" that
+    // is honest on a server that cannot warn anyone.
+    canRestartWhenEmpty: Boolean(profile && t.kind === 'game' && t.startCommand
+      && (profile.transport !== 'none' || (profile.query && t.queryPort))),
+    // Shown where the console and broadcast controls would have been. An empty
+    // gap reads as a broken card; one line naming the reason reads as a
+    // different game.
+    remoteNote: (profile && profile.transport === 'none' && profile.noRemoteNote) || null,
     // A game with no control transport can still have a readable player count
     // (Icarus answers Steam queries), so the players panel is not tied to RCON.
     hasQuery: Boolean(profile?.query && t.queryPort),
@@ -100,6 +116,11 @@ const publicTarget = (t) => {
     // Workshop mods are reported, never installed, so this only decides whether
     // the card can show a mod line at all.
     hasModChecks: workshop.managed(t.id),
+    // Separate from hasModChecks: the update comparison needs a Steam Workshop
+    // subscription to compare against, while simply listing what is installed
+    // works for any game with a mods folder -- including one whose mods come
+    // from mod.io, where there is nothing to compare.
+    hasMods: Boolean(modSource(t, profile)),
     gamePort: t.gamePort ?? null, rconPort: t.rconPort ?? null,
     queryPort: t.queryPort ?? null,
     maxPlayers: t.maxPlayers ?? null, serviceName: t.serviceName ?? null,
@@ -124,6 +145,16 @@ function statusPayload() {
 }
 
 app.get('/api/status', (_req, res) => res.json(statusPayload()));
+
+// What is installed, as opposed to what needs updating -- see src/mods.js. Read
+// on demand rather than polled: it only changes when somebody installs a mod,
+// and it costs a walk of the mods folder.
+app.get('/api/mods/:id', (req, res) => {
+  const t = config.targets.find((x) => x.id === req.params.id);
+  if (!t) return res.status(404).json({ error: 'unknown target' });
+  const profile = t.kind === 'game' ? getProfile(t.game) : null;
+  return res.json(modInventory(t, profile));
+});
 
 app.get('/api/history/:id', (req, res) => {
   const minutes = Math.min(Number(req.query.minutes) || 180, config.historyHours * 60);
@@ -308,6 +339,7 @@ app.post('/api/action/:id', async (req, res) => {
       case 'save':           return res.json(await actions.save(id));
       case 'broadcast':      return res.json(await actions.broadcast(id, String(message || '').trim()));
       case 'scheduleRestart':return res.json(actions.scheduleRestart(id, Number(minutes) || 15, reason || 'scheduled restart'));
+      case 'restartWhenEmpty':return res.json(actions.restartWhenEmpty(id, Number(minutes) || 60, reason || 'restart when empty'));
       case 'cancelRestart':  return res.json(actions.cancelRestart(id));
       case 'steamCheck':     return res.json(await steam.check(id, { force: true }));
       case 'steamUpdate':    return res.json(await steam.begin(id));

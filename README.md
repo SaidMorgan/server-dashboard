@@ -9,9 +9,9 @@ It runs on **Windows**, needs **Node 20+**, and has **one dependency** (Express)
 
 ![The dashboard](docs/images/dashboard.png)
 
-**Supported out of the box:** ARK: Survival Ascended, Palworld, Minecraft (Java),
-7 Days to Die, any Source-engine game, Valheim, plus any Windows service and any
-process at all. [Adding your own game](docs/games.md) is one small file.
+**Supported out of the box:** ARK: Survival Ascended, Palworld, Minecraft (Java
+and Bedrock), 7 Days to Die, any Source-engine game, Valheim, plus any Windows
+service and any process at all. [Adding your own game](docs/games.md) is one small file.
 
 ---
 
@@ -190,6 +190,44 @@ another drive still resolves. If no manifest is found the button is hidden
 rather than shown broken. Everything this feature raises is tagged with the
 `update` alert category, so one entry in a channel's `mute` list keeps it out of
 chat while the activity feed still shows all of it.
+
+### Mods
+
+Every game card with a mods folder gets a **Mods** panel listing what is
+installed — name, version, author, size on disk, when it was installed, and its
+dependencies. Two layouts are read:
+
+- **Steam Workshop**, as a mod manager installs it: one folder per mod, each
+  with an `InstallManifest.json`. Add a `workshopMods` block to the target (see
+  below) and each mod is also compared against what the Steam client has
+  downloaded, so an update waiting to be applied is flagged.
+- **Loose Unreal packages** (`.pak`, and its `.utoc`/`.ucas`/`.sig` siblings) for
+  games that simply load mods from a folder — Icarus, whose mods come from
+  mod.io. There is no subscription to compare against, so the panel reports what
+  is on disk rather than inventing an update state.
+
+Most games find their own mods folder from their profile. Point a target at a
+different one with:
+
+```jsonc
+"mods": {
+  "dir": "C:\\GameServers\\IcarusServer\\Icarus\\Mods",
+  "kind": "paks"        // or "workshop" for manifested one-folder-per-mod
+}
+```
+
+Three flags mark a mod that needs a decision: **update waiting** (Steam has a
+newer copy — refresh it in your mod manager), **not subscribed** (installed here
+but with no source left, so it will never update again), and **not loaded**
+(installed, but missing from the game's own active mod list — the server is
+ignoring it). That last one is the most common "why isn't my mod working", and
+it is invisible from the folder alone.
+
+Nothing on this panel writes. The game itself can be updated unattended because
+`app_update` is verifiable and repairable; a mod is built against one game
+build, can take the server down on the first player join, and has no `validate`
+to undo it. So the dashboard reports, and a person decides. See
+[docs/games.md](docs/games.md) for the Palworld and Icarus specifics.
 
 ### Watchdog — restart it when it crashes
 
@@ -434,15 +472,24 @@ sc query ServerDashboard
 | Players | live names, a count for games that only answer Steam queries (Icarus), or "nobody online — safe to restart" |
 | Controls | Start / Restart / Stop / Save world |
 | Warn & restart | broadcasts at 15/10/5/1 min, then restarts. Cancellable |
+| Restart when empty | waits for the last player to leave, then restarts; gives up rather than restarting on top of players |
 | Broadcast | send a message to everyone in-game |
 | Console | raw RCON command box |
 | Chart | 3h of player count; red bands are downtime |
+| Mods | what is installed: version, author, size, and a flag when one needs a decision |
 | Schedules | recurring jobs for this server |
 | Backups | run, download, restore |
 | Log tail | last 200 lines |
 
 Controls that a game can't support are hidden rather than shown and failing — a
-Valheim card has no broadcast box, because Valheim has no way to send one.
+Valheim card has no broadcast box, because Valheim has no way to send one. A game
+with no remote interface at all says which one it is and why, in the space those
+controls would have taken, rather than leaving a gap.
+
+**Warn & restart vs Restart when empty.** The first is a promise to restart at a
+fixed time and warn people on the way; the second is a promise not to interrupt
+anyone. Prefer the second for housekeeping, and for any game that cannot
+broadcast — there, a countdown is only a warning nobody receives.
 
 Stop and Restart confirm first and warn if players are online. Both save the
 world first and only force-kill if the server ignores the request.

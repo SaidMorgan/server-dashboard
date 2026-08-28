@@ -81,6 +81,39 @@ export default {
       + 'or "FOnlineAsyncTaskSteamCreateServer bWasSuccessful: 0" (Steam did not answer)',
   },
 
+  // Shown on the card in place of the console and broadcast boxes. Those are
+  // hidden because they cannot work here, and a blank space where Palworld has
+  // three controls reads as a broken card rather than a different game — so say
+  // which it is, once, where the missing controls would have been.
+  noRemoteNote: 'Icarus exposes no RCON, REST or console port, so in-game '
+    + 'broadcasts and a clean remote shutdown are not possible. Stop and Restart '
+    + 'work by terminating the process; SaveGameOnExit=True in ServerSettings.ini '
+    + 'is what makes that safe. Admin commands are typed in-game with \\ by a '
+    + 'player whose Steam ID is in the AdminPassword section.',
+
+  // Where the Mods panel looks, relative to the target's steamInstallDir. Icarus
+  // distributes mods through mod.io rather than the Steam Workshop, and they
+  // arrive as loose Unreal packages rather than as manifested folders, so there
+  // is no "an update is waiting" to compute — the panel lists what is present
+  // and when it was last written.
+  //
+  // Three candidates because the engine will load from any of them and which
+  // one is in use depends on how the mod was installed; the first that exists
+  // wins, and if none do, the first is where they would go.
+  mods: {
+    kind: 'paks',
+    candidates: [
+      'Icarus/Mods',
+      'Icarus/Content/Paks/~mods',
+      'Icarus/Content/Paks/mods',
+    ],
+    note: 'Icarus mods come from mod.io as loose .pak files, not from the Steam '
+      + 'Workshop, so there is no subscription to compare against — this lists '
+      + 'what is on disk. A mod built for an older build can stop the server '
+      + 'loading a prospect, so remove it here and restart if a game update '
+      + 'breaks the server.',
+  },
+
   setupNotes: [
     'The name players see in the server browser comes from -SteamServerName= on',
     'the command line, not from SessionName in ServerSettings.ini. Without the',

@@ -274,6 +274,59 @@ details.logs summary {
 .backuplist .empty { color: var(--dim); font-style: italic; font-family: inherit; }
 .backup-status { color: var(--dim); font-size: 12px; font-family: var(--mono); align-self: center; }
 
+/* Mods. One block per mod rather than one line: a name, a flag when it needs a
+   decision, and the details under it — version, author, size, age. */
+.modlist { list-style: none; margin: 8px 0 0; padding: 0; font-size: 12px; }
+.modlist li { padding: 6px 0; border-bottom: 1px solid var(--line); }
+.modlist li:last-child { border-bottom: none; }
+.modlist .empty { color: var(--dim); font-style: italic; }
+.mod-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mod-name { font-family: var(--mono); font-size: 13px; }
+.mod-meta { color: var(--dim); font-family: var(--mono); font-size: 11px; margin-top: 2px; overflow-wrap: anywhere; }
+.mod-deps { color: var(--dim); font-size: 11px; margin-top: 2px; font-style: italic; }
+
+/* Colour-coded by what it costs you: an update you have not applied is amber,
+   a mod the server silently is not loading is red, a mod that can never update
+   again is dim — it still works, it is just frozen. */
+.mod-flag {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+  border: 1px solid var(--line); border-radius: 20px; padding: 0 6px;
+  color: var(--dim); cursor: help; flex: none;
+}
+.mod-flag.stale { color: var(--warn); border-color: var(--warn); }
+.mod-flag.off { color: var(--bad); border-color: var(--bad); }
+
+.mods-count { color: var(--dim); font-family: var(--mono); font-size: 11px; text-transform: none; letter-spacing: 0; }
+.mods-count.warn { color: var(--warn); }
+.mods-count.bad { color: var(--bad); }
+.mods-status { color: var(--dim); font-size: 11px; align-self: center; }
+.mods-status.bad { color: var(--bad); }
+.mods-where { color: var(--dim); font-size: 11px; margin-top: 8px; overflow-wrap: anywhere; }
+.mods-where div + div { margin-top: 2px; }
+details.mods summary, details.backups summary, details.schedules summary {
+  cursor: pointer; color: var(--dim); font-size: 11px;
+  text-transform: uppercase; letter-spacing: .06em; font-weight: 600;
+}
+.mini-btn { padding: 3px 9px; font-size: 12px; }
+
+/* Why a card is missing controls another card has, said once where they would
+   have been. Without it a no-RCON game just looks like a card that failed to
+   finish rendering. */
+.no-remote {
+  margin-top: 10px; padding: 8px 10px; font-size: 11.5px; line-height: 1.5;
+  color: var(--dim); background: #0d1117;
+  border: 1px solid var(--line); border-left: 3px solid var(--line);
+  border-radius: 0 6px 6px 0;
+}
+
+/* Where an action's result goes on a card with no console pane to put it in —
+   every service card, and every game with no remote interface. */
+.action-status {
+  color: var(--dim); font-family: var(--mono); font-size: 11.5px;
+  margin-top: 8px; overflow-wrap: anywhere;
+}
+.action-status:empty { display: none; }
+
 .mini {
   background: none; border: 1px solid var(--line); color: var(--dim);
   border-radius: 5px; cursor: pointer; padding: 1px 6px; font-size: 11px;

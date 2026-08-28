@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { rconCommand, getClient } from './rcon.js';
 import { queryInfo, queryPlayers } from './a2s.js';
+import { queryInfo as raknetInfo } from './raknet.js';
 import { getProfile } from './games/index.js';
 import { getProcessStats, getServiceState, getServiceProcess, checkHealth, toast } from './win.js';
 
@@ -198,6 +199,10 @@ export class Monitor {
       players: null,
       playerCount: null,
       query: profile.query ? 'unknown' : 'n/a',
+      // The UI labels the query tile with the dialect rather than calling
+      // everything a Steam query — Bedrock's ping has nothing to do with Steam,
+      // and a tile that names the wrong system sends people to the wrong docs.
+      queryProtocol: profile.query?.protocol ?? null,
       rcon: 'unknown',
       checkedAt: Date.now(),
     };
@@ -282,9 +287,10 @@ export class Monitor {
     return snap;
   }
 
-  // A2S over UDP. Failure here is never fatal to the snapshot: a query that
-  // does not answer costs the player count, and everything read from the
-  // process table stands on its own.
+  // A read-only player-count query over UDP, in whichever dialect the profile
+  // speaks: A2S for Steam-registered games, RakNet for Bedrock. Failure here is
+  // never fatal to the snapshot: a query that does not answer costs the player
+  // count, and everything read from the process table stands on its own.
   async #pollQuery(target, profile, snap, running) {
     if (!running) {
       snap.query = 'offline';
@@ -303,7 +309,10 @@ export class Monitor {
       }
     }
 
-    const info = await queryInfo({ host: target.host, port: target.queryPort });
+    // Both dialects answer with the same shape — { ok, name, players,
+    // maxPlayers, ms } — so everything below this line is protocol-agnostic.
+    const askInfo = profile.query.protocol === 'raknet' ? raknetInfo : queryInfo;
+    const info = await askInfo({ host: target.host, port: target.queryPort });
     if (!info.ok) {
       snap.query = 'error';
       snap.queryError = info.error;
@@ -395,7 +404,8 @@ export class Monitor {
     // Worth saying out loud even though the process is alive: a server that has
     // stopped answering Steam is a server nobody can find in the browser.
     if (snap.kind === 'game' && prev.query === 'ok' && snap.query === 'error') {
-      this.addAlert('warn', snap.id, `Steam query stopped responding: ${snap.queryError}`);
+      const dialect = snap.queryProtocol === 'raknet' ? 'Server ping' : 'Steam query';
+      this.addAlert('warn', snap.id, `${dialect} stopped responding: ${snap.queryError}`);
     }
     if (snap.kind === 'service' && prev.healthy && !snap.healthy && snap.serviceStatus === 'Running') {
       this.addAlert('warn', snap.id, `Health check failing (${snap.healthError || snap.httpStatus}) while the service still runs`);

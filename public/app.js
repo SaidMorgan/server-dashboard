@@ -97,11 +97,24 @@ function buildCard(target) {
   if (caps.canBroadcast === false) {
     hide('.broadcast-msg');
     hide('[data-act=broadcast]');
-    hide('[data-act=scheduleRestart]');
-    hide('[data-act=cancelRestart]');
-    hide('.countdown-min');
   }
+  // The delayed restart is the dashboard's own timer and does not need a way to
+  // talk to the server, so it is kept separate from broadcast: without a chat
+  // channel it still restarts on time, it just cannot tell anyone first. Losing
+  // the ability to schedule a restart at all was too high a price for that.
+  if (!caps.canDelayRestart) hide('.delay-row');
+  if (!caps.canRestartWhenEmpty) hide('[data-act=restartWhenEmpty]');
   if (caps.canConsole === false) hide('.console');
+  if (!caps.hasMods) hide('.mods');
+
+  // Where the console and the broadcast box would have been, say which game
+  // this is and why it has neither — a card that is simply missing half of
+  // another card's controls looks broken.
+  if (caps.remoteNote) {
+    const note = node.querySelector('.no-remote');
+    note.textContent = caps.remoteNote;
+    note.classList.remove('hidden');
+  }
   if (caps.canStart === false) hide('[data-act=start]');
   if (!caps.canUpdate) hide('[data-act=updateRestart]');
   if (!caps.canSteamUpdate) hide('[data-act=steamUpdate]');
@@ -173,6 +186,7 @@ function buildCard(target) {
 
   wireSchedules(target, node);
   wireBackups(target, node);
+  wireMods(target, node);
 
   cardsEl.append(node);
   cards.set(target.id, node);
@@ -279,6 +293,21 @@ async function runAction(target, node, btn) {
   if (action === 'scheduleRestart') {
     body.minutes = Number(node.querySelector('.countdown-min').value) || 15;
   }
+  // Same box, different meaning: for a countdown it is how long until the
+  // restart, here it is how long to keep waiting before giving up. Say which,
+  // because pressing the wrong one of two adjacent buttons is easy.
+  if (action === 'restartWhenEmpty') {
+    body.minutes = Number(node.querySelector('.countdown-min').value) || 60;
+    const count = node.dataset.playerCount || '0';
+    if (!confirm(
+      `Restart ${target.name} as soon as nobody is online?\n\n`
+      + (count === '0'
+        ? 'Nobody is online now, so this will restart almost immediately.'
+        : `${count} player(s) are online, so it will wait for them to leave.`)
+      + `\n\nIf the server has not emptied within ${body.minutes} minute(s), the restart `
+      + 'is abandoned — it will not restart on top of players.',
+    )) return;
+  }
   // The Steam check only stops the server if there is actually something to
   // install, so the confirmation has to describe a maybe rather than a certainty.
   if (action === 'steamUpdate') {
@@ -308,7 +337,12 @@ async function runAction(target, node, btn) {
   }
 
   btn.classList.add('busy');
-  const out = node.querySelector('.output');
+  // A card with no console has no console output pane either, and until this
+  // line every result on those cards — Icarus, and every service — was written
+  // into a hidden element. Same feedback, somewhere it can be read.
+  const out = (capabilities.get(target.id)?.canConsole)
+    ? node.querySelector('.output')
+    : node.querySelector('.action-status');
   if (out) out.textContent = `${action}…`;
 
   // A game server is asked to save and exit, and a large world can take a minute
@@ -555,7 +589,8 @@ function statTiles(snap) {
   // the number above it is current, and it is the first thing to go when a
   // server is running but has fallen out of the Steam browser.
   if (snap.query && snap.query !== 'n/a') {
-    tiles.push(['Steam query', snap.query === 'ok' ? 'answering' : (snap.queryError || snap.query),
+    const queryLabel = snap.queryProtocol === 'raknet' ? 'Server ping' : 'Steam query';
+    tiles.push([queryLabel, snap.query === 'ok' ? 'answering' : (snap.queryError || snap.query),
       snap.query === 'ok' ? 'good' : (snap.up && snap.query !== 'starting' ? 'warn' : '')]);
   }
   tiles.push(['Port', String(snap.gamePort ?? '—'), '']);
@@ -608,7 +643,7 @@ function render(snap, pending, updates, mods) {
       : `<li class="empty">${count} player(s) online — this game does not publish names</li>`;
   } else if (!players) {
     const why = snap.query === 'starting' ? 'still starting — no player count yet'
-      : snap.rcon === 'n/a' ? 'Steam query unavailable — cannot read the player count'
+      : snap.rcon === 'n/a' ? `${snap.queryProtocol === 'raknet' ? 'Server ping' : 'Steam query'} unavailable — cannot read the player count`
       : 'RCON unavailable — cannot read player list';
     list.innerHTML = `<li class="empty">${snap.up ? why : 'server offline'}</li>`;
   } else if (!players.length) {
@@ -623,7 +658,13 @@ function render(snap, pending, updates, mods) {
   const p = pending?.[snap.id];
   if (p) {
     const left = Math.max(0, Math.round((p.finishAt - Date.now()) / 1000));
-    cd.textContent = `⏱ Restarting in ${Math.floor(left / 60)}m ${String(left % 60).padStart(2, '0')}s — ${p.reason}`;
+    const clock = `${Math.floor(left / 60)}m ${String(left % 60).padStart(2, '0')}s`;
+    // Two different things end at finishAt: a countdown ends with a restart, a
+    // wait-for-empty ends with the restart being abandoned. Wording them the
+    // same would make "giving up in 2m" look like "restarting in 2m".
+    cd.textContent = p.mode === 'empty'
+      ? `⏱ Waiting for the server to empty, then restarting — giving up in ${clock}`
+      : `⏱ Restarting in ${clock} — ${p.reason}`;
     cd.classList.remove('hidden');
   } else {
     cd.classList.add('hidden');
@@ -821,6 +862,145 @@ async function loadBackups(id, node) {
       loadBackups(id, node);
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Mods
+//
+// What is installed, which is a different question from the banner above the
+// card: that one only speaks up when an update is waiting, so on a healthy
+// modded server it says nothing at all and you still had to go and look in the
+// folder to find out what the server is running. This is the list.
+//
+// Nothing here writes. Enabling, updating and removing mods stay in the mod
+// manager for the reason src/workshop.js gives: a mod has no `validate` to undo
+// a bad one, and the server can be fine until the first player joins.
+// ---------------------------------------------------------------------------
+
+function wireMods(target, node) {
+  const details = node.querySelector('details.mods');
+  // Hidden at build time when this target has no mods folder at all — no panel,
+  // so nothing to wire and nothing to fetch.
+  if (!details || details.classList.contains('hidden')) return;
+
+  details.addEventListener('toggle', function () {
+    if (this.open) loadMods(target.id, node);
+  });
+
+  node.querySelector('.mods-refresh').addEventListener('click', async (event) => {
+    const btn = event.currentTarget;
+    btn.classList.add('busy');
+    // Ask the background checker to re-run first where there is one, so the
+    // "update waiting" column is as fresh as the rest of the row rather than up
+    // to six hours old.
+    if (capabilities.get(target.id)?.hasModChecks) {
+      await api(`/api/action/${target.id}`, { method: 'POST', body: JSON.stringify({ action: 'modsCheck' }) })
+        .catch(() => {});
+    }
+    await loadMods(target.id, node);
+    btn.classList.remove('busy');
+  });
+
+  // The count is the useful part at a glance, so it is fetched once on load
+  // rather than waiting for somebody to open the panel.
+  loadMods(target.id, node, { quiet: true });
+}
+
+// One line per mod. The two things worth seeing without opening anything are
+// how many there are and whether any of them are in a state that needs a
+// decision — an update waiting, a mod the server is not loading, a mod with no
+// subscription left to update from.
+function modLine(m) {
+  const bits = [];
+  if (m.version) bits.push(`v${m.version}`);
+  if (m.author) bits.push(`by ${m.author}`);
+  if (m.bytes != null) bits.push(fmtBytes(m.bytes));
+  if (m.installedAt) bits.push(`installed ${fmtWhen(m.installedAt)}`);
+
+  const flags = [];
+  if (m.status === 'stale') {
+    flags.push(['stale', 'update waiting', `Steam has a newer copy than the one installed${m.sourceAt ? ` (published ${fmtWhen(m.sourceAt)})` : ''}. Refresh it in your mod manager.`]);
+  }
+  if (m.status === 'unsubscribed') {
+    flags.push(['orphan', 'not subscribed', 'Installed here but not subscribed in the Steam client, so it will never receive an update.']);
+  }
+  // Only an explicit false. A game with no mod list to read reports null, and
+  // "we cannot tell" must not be shown as "the server is ignoring this".
+  if (m.enabled === false) {
+    flags.push(['off', 'not loaded', 'Installed, but missing from the game’s active mod list — the server is not loading it.']);
+  }
+
+  const deps = m.dependencies?.length
+    ? `<div class="mod-deps">needs ${m.dependencies.map(escapeHtml).join(', ')}</div>`
+    : '';
+
+  return `<li>
+    <div class="mod-top">
+      <span class="mod-name">${escapeHtml(m.displayName || m.name)}</span>
+      ${flags.map(([cls, label, why]) => `<span class="mod-flag ${cls}" title="${escapeHtml(why)}">${label}</span>`).join('')}
+    </div>
+    <div class="mod-meta">${escapeHtml(bits.join(' · ')) || '—'}</div>
+    ${deps}
+  </li>`;
+}
+
+async function loadMods(id, node, { quiet = false } = {}) {
+  const list = node.querySelector('.modlist');
+  const count = node.querySelector('.mods-count');
+  const where = node.querySelector('.mods-where');
+  const status = node.querySelector('.mods-status');
+  if (!list) return;
+
+  let res;
+  try {
+    res = await api(`/api/mods/${id}`);
+  } catch {
+    return;
+  }
+
+  if (!res.ok) {
+    count.textContent = '(unreadable)';
+    count.className = 'mods-count bad';
+    list.innerHTML = `<li class="empty">could not read the mods folder — ${escapeHtml(res.error || 'unknown error')}</li>`;
+    where.textContent = res.dir || '';
+    return;
+  }
+
+  const c = res.counts || { total: 0 };
+  const notes = [];
+  if (c.stale) notes.push(`${c.stale} update${c.stale > 1 ? 's' : ''} waiting`);
+  if (c.disabled) notes.push(`${c.disabled} not loaded`);
+  if (c.unsubscribed) notes.push(`${c.unsubscribed} unsubscribed`);
+  count.textContent = c.total
+    ? `· ${c.total}${notes.length ? ` · ${notes.join(', ')}` : ''}`
+    : '· none';
+  count.className = `mods-count${notes.length ? ' warn' : ''}`;
+
+  // A master switch that turns every mod off outranks every per-mod state below
+  // it, and it is invisible in the list — every mod still reads as enabled.
+  if (res.globalOff) {
+    status.textContent = 'Mods are switched OFF globally in the game’s mod settings — none of these are loading.';
+    status.className = 'mods-status bad';
+  } else if (!quiet) {
+    status.textContent = `read ${fmtTime(res.checkedAt || Date.now())}`;
+    status.className = 'mods-status';
+  }
+
+  if (!res.mods.length) {
+    list.innerHTML = res.missing
+      ? '<li class="empty">no mods installed — nothing in the mods folder yet</li>'
+      : '<li class="empty">no mods installed</li>';
+  } else {
+    list.innerHTML = res.mods.map(modLine).join('');
+  }
+
+  // The folder is the answer to "where do I go to change this", which is the
+  // next question every time, since nothing on this panel changes anything.
+  const lines = [];
+  if (res.dir) lines.push(`${res.missing ? 'Would be read from' : 'Read from'} ${res.dir}`);
+  if (res.enabledFile) lines.push(`Active list: ${res.enabledFile}`);
+  if (res.note) lines.push(res.note);
+  where.innerHTML = lines.map((l) => `<div>${escapeHtml(l)}</div>`).join('');
 }
 
 // ---------------------------------------------------------------------------
