@@ -83,7 +83,13 @@ body.solo .feed { max-width: 720px; margin: 0 auto; }
   gap: 1px; background: var(--line);
   border-bottom: 1px solid var(--line);
 }
-.stat { background: var(--panel); padding: 8px 12px; }
+.stat { background: var(--panel); padding: 8px 12px; min-width: 0; }
+/* For values too long for one 90px cell — the version string. Spanning two
+   columns is what keeps "Paper 26.2-120" on one line; min-width:0 above is what
+   lets a grid item shrink inside its track at all, without which a long value
+   pushes the whole row wider instead of staying in its cell. */
+.stat.wide { grid-column: span 2; }
+.stat.wide .v { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .stat .k { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
 .stat .v { font-family: var(--mono); font-size: 13px; margin-top: 2px; }
 .stat .v.bad { color: var(--bad); }
@@ -180,6 +186,35 @@ select.rcon-pick:focus { outline: none; border-color: var(--accent); }
   overflow-wrap: anywhere;
 }
 .cmd-help.danger { color: var(--warn); }
+
+/* Word-by-word suggestions under the console box: which command, then which
+   argument, then which value for that argument. Absolutely positioned so the
+   list never pushes the rest of the card around as it grows and shrinks. */
+.cmd-typeahead { position: relative; }
+.cmd-suggest {
+  position: absolute; z-index: 20; top: 100%; left: 0; right: 0; margin: 4px 0 0;
+  padding: 4px; list-style: none;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+  max-height: 240px; overflow-y: auto;
+}
+.cmd-suggest li {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 4px 8px; border-radius: 4px; cursor: pointer;
+  font-family: var(--mono); font-size: 12px; color: var(--text);
+}
+.cmd-suggest li .word { white-space: nowrap; }
+.cmd-suggest li .word b { color: var(--accent); font-weight: 600; }
+.cmd-suggest li .note {
+  color: var(--dim); font-family: inherit; font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cmd-suggest li.active, .cmd-suggest li:hover { background: #263041; }
+.cmd-suggest li.risky .word { color: var(--warn); }
+.cmd-suggest .more {
+  padding: 4px 8px; color: var(--dim); font-size: 11px; cursor: default;
+}
+.cmd-suggest .more:hover { background: none; }
 details.logs summary {
   cursor: pointer; color: var(--dim); font-size: 11px;
   text-transform: uppercase; letter-spacing: .06em; font-weight: 600;
@@ -262,6 +297,46 @@ details.logs summary {
 .sched-hint { color: var(--dim); font-size: 11px; margin-top: 6px; }
 .sched-message { width: 100%; }
 
+/* Moderation. Two lists with different jobs: the ban list is a thing you act
+   on, so every row ends in a button; the event feed is a thing you read, so no
+   row in it is clickable. Kept visually distinct for that reason. */
+.moderation .mod-head {
+  margin: 14px 0 0; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .06em; color: var(--dim);
+}
+.ban-add { margin-top: 8px; }
+.ban-add .ban-name { flex: 0 1 150px; }
+.ban-add .ban-reason { flex: 1 1 160px; min-width: 0; }
+.mod-status { color: var(--dim); font-size: 12px; font-family: var(--mono); margin-top: 6px; }
+
+.banlist, .modevents { list-style: none; margin: 6px 0 0; padding: 0; font-size: 12px; }
+.banlist li, .modevents li {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 5px 0; border-bottom: 1px solid var(--line);
+}
+.banlist li:last-child, .modevents li:last-child { border-bottom: none; }
+.banlist .empty, .modevents .empty { color: var(--dim); font-style: italic; }
+
+.ban-who { font-family: var(--mono); font-size: 13px; color: var(--bad); }
+.ban-why { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.ban-meta { color: var(--dim); font-family: var(--mono); font-size: 11px; }
+
+/* The verb first and colour-coded, so the feed can be skimmed down one column:
+   red was thrown out for good, amber can come back, green was let back in. */
+.ev-kind {
+  flex: none; min-width: 62px; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.ev-kind.bad { color: var(--bad); }
+.ev-kind.warn { color: var(--warn); }
+.ev-kind.good { color: var(--good); }
+.ev-kind.dim { color: var(--dim); }
+.ev-who { font-family: var(--mono); font-size: 12.5px; }
+.ev-why { flex: 1; min-width: 0; color: var(--dim); overflow-wrap: anywhere; }
+.ev-meta { color: var(--dim); font-family: var(--mono); font-size: 11px; }
+
+.mini.good:hover { color: var(--good); border-color: var(--good); }
+
 /* Backups */
 .backuplist { list-style: none; margin: 8px 0 0; padding: 0; font-size: 12px; font-family: var(--mono); }
 .backuplist li {
@@ -295,6 +370,9 @@ details.logs summary {
 }
 .mod-flag.stale { color: var(--warn); border-color: var(--warn); }
 .mod-flag.off { color: var(--bad); border-color: var(--bad); }
+.mod-flag.dupe { color: var(--bad); border-color: var(--bad); }
+/* Neither good nor bad: something the dashboard cannot do for you. */
+.mod-flag.note { color: var(--dim); border-color: var(--line); }
 
 .mods-count { color: var(--dim); font-family: var(--mono); font-size: 11px; text-transform: none; letter-spacing: 0; }
 .mods-count.warn { color: var(--warn); }

@@ -153,8 +153,9 @@ leaves the mods exactly where they were.
 That is usually what you want -- but a game version bump can still break a mod
 built against the old one. If the server comes back up after an update and
 something is wrong, check `Mods\NativeMods\UE4SS\UE4SS.log` first; it names each
-mod as it loads. Refreshing mods is a manual pass in PalSphere, pointed at
-`C:\GameServers\PalServer`.
+mod as it loads. Installing, enabling and removing a mod is a pass in PalSphere,
+pointed at `C:\GameServers\PalServer`; *updating* one it already installed is
+the "Refresh from Steam" button described below.
 
 ### ...but the dashboard tells you when one is waiting
 
@@ -179,7 +180,7 @@ Three states, kept apart because they need different things from you:
 | State | Meaning |
 | --- | --- |
 | current | nothing to do |
-| stale | Steam has a newer copy; refresh it in the mod manager |
+| stale | Steam has a newer copy; "Refresh from Steam" copies it in |
 | unsubscribed | installed here, not subscribed in the client -- it will never update again |
 
 Two details that decide whether the answer is trustworthy:
@@ -216,6 +217,10 @@ in a state that needs a decision:
 | not subscribed | no subscription left to update from |
 | not loaded | installed, but missing from the game's active mod list |
 
+The same panel serves three layouts, chosen by `mods.kind`: `workshop` (this
+one), `paks` (Icarus — loose Unreal files), and `plugins` (Minecraft — Bukkit
+jars, see below). Only the first has a Steam copy to compare against.
+
 **"not loaded" is the one worth knowing about.** Installed and enabled are
 different states in Palworld: `Mods\PalModSettings.ini` carries one
 `ActiveModList=` line per *enabled* mod, and the mod manager leaves disabled
@@ -232,8 +237,67 @@ the mod's own folder. A UE4SS mod keeps one `Info.json` under `ManagedMods` and
 its actual payload — dlls, Lua, config — under `NativeMods`, so measuring the
 folder it is named after would report a 400-byte mod.
 
-Nothing on this panel writes. Enabling, updating and removing mods stay in the
-mod manager, for the same reason the sweep above only ever raises a flag.
+### "Refresh from Steam" installs the copy Steam already downloaded
+
+The button next to the "update waiting" notice (and in the Mods panel) does the
+second hop by itself: stop the server, copy the newer files in, start it again.
+The Steam client does the first hop on its own -- it keeps subscribed items
+current in `steamapps\workshop\content\1623730` whenever it is running -- so
+between the two, an update lands without a manual pass.
+
+The stop is not a courtesy. `UE4SS.dll` is mapped into the running server
+process, and Windows will not let anything replace a file a live process holds
+open; a refresh on a running server is not a slower refresh, it is a half-written
+one. So it refuses unless the player count reads a confirmed zero -- an unknown
+count is not an empty server -- and the confirmation offers to override that
+after saying what it costs.
+
+What it will and will not touch is the whole design, and the confirmation lists
+it per mod before anything happens:
+
+| Bucket | What is in it |
+| --- | --- |
+| copied | files listed in this mod's `InstallManifest.json` whose Steam copy differs |
+| already identical | same bytes on both sides -- a republished item with unchanged content is common, and it is why a refresh often copies nothing at all |
+| left alone | the destination has been edited since it was installed |
+| not in the Steam copy | the manager wrote it, the item does not contain it -- its own `config.ini.bak-*` files, mostly |
+| extra | the item contains it, this server never received it |
+
+**Only files the mod already installed are replaced.** The manager decides what
+a mod installs; this refreshes what it installed, from the item it came from.
+Each file's destination is recovered from the recorded path by suffix --
+`Mods/NativeMods/UE4SS/Mods/PalSchema/dlls/main.dll` against the item's
+`dlls/main.dll` -- rather than by reimplementing the manager's `InstallRule`
+language, because inferring where a mod's files *should* go is exactly the guess
+that writes a dll into the wrong folder. A workshop item normally carries more
+than the server got: a client-only mod installs one `Info.json` here and keeps
+its Paks and Lua for the game. Those show up as *extra* and are never installed.
+If an update genuinely adds a new server file, that is where it appears, and
+PalSphere is what installs it.
+
+**A destination edited since the install is never overwritten.** `Mods\mods.txt`
+is the case that matters: it is the list of what UE4SS loads, it is routinely
+hand-edited, and the workshop copy is the stock one. Replacing it would switch
+mods off silently. The test is the file's mtime against `LastInstallTimeUtc` in
+the manifest, which catches an edit without needing to know which files are
+configuration.
+
+**Everything replaced is kept.** Previous copies go to
+`data\mod-backups\<target>\<timestamp>\<mod>\<the same relative path>`, so
+putting one back is a plain copy over the top. They live in the dashboard's data
+folder rather than beside the originals -- the manager's habit of leaving
+`config.ini.bak-20260827` next to the file it replaced is how a mods folder fills
+up with things nothing will ever clean.
+
+Afterwards the mod's `LastInstallTimeUtc` is re-dated, which is what clears the
+`stale` flag. For an item republished with identical bytes that is the *entire*
+operation: nothing to copy, so the server is never stopped, and the notice goes
+away because the two copies were verified to match.
+
+Nothing else on the panel writes. Installing, enabling and removing mods stay in
+the mod manager, for the same reason the sweep only ever raises a flag: a mod is
+built against one game build, can take the server down on the first player join,
+and has no `validate` to undo it.
 
 
 ---
@@ -252,6 +316,137 @@ rcon.password=your-password
 dashboard can't tell them apart, so **per-process CPU and RAM may report the
 wrong server**. Player counts and RCON control are unaffected, since those go
 over RCON to a specific port.
+
+### The Plugins panel lists what is installed
+
+A Bukkit/Paper server keeps one jar per plugin in `plugins\`, and everything
+worth knowing about a plugin is in the `plugin.yml` *inside* that jar. The panel
+opens each jar and reads it (`src/pluginjar.js` — a jar is a zip, and the
+manifest is the only entry it seeks, so a 20 MB Geyser costs a few kilobytes of
+reads and no dependency).
+
+The panel is headed **Plugins**, not Mods, because a Paper server has no mods
+folder and sending you to look for one would be a lie. That word comes from the
+profile's `mods.noun`.
+
+Per plugin it shows the name **the server uses** — from the manifest, not the
+filename — plus version, author, the filename when it differs, size, when it was
+installed, and:
+
+| Field / flag | Meaning |
+| --- | --- |
+| `API ≥ 1.21.4` | the oldest Minecraft API the plugin declares it works with |
+| update staged | a newer jar is waiting in the update folder for the next restart |
+| duplicate | another jar declares the same plugin name; the server loads one and refuses the other |
+| not loaded | renamed to `.jar.disabled`/`.bak`/`.old`, so Paper does not load it |
+
+**`API ≥` is a floor, not a build version.** It is the oldest Minecraft API the
+plugin declares it works with, so a plugin that is actively maintained can still
+say `1.13` if it never raised its floor — read it as "cannot load on a server
+older than this", not as "was built for this". The real check before a version
+bump is each plugin's own release notes; Geyser and Floodgate in particular have
+to move in the same pass as the server, which is why `minecraftUpdate` defaults
+to `"track": "same"` for Paper and follows new *builds* rather than new
+versions.
+
+Three states the folder listing alone hides, and each is somebody's afternoon:
+a plugin renamed to `.jar.disabled` still looks installed; a self-updating
+plugin's new jar sits in the update folder (named in `bukkit.yml`, `update`
+everywhere) until the next restart, so the version on the card is not the
+version that will be running tomorrow; and two jars declaring the same name is
+what happens when a new version is dropped in without deleting the old one.
+
+Nothing on the panel changes anything by itself. **Check for update** replaces
+the server jar only and never touches `plugins/`; installing a plugin is the
+separate **Update plugins** button below. Vanilla servers have no `plugins/`
+folder; the panel says so and names where it would be.
+
+Override the folder per target if your install differs:
+
+```json
+"mods": { "dir": "C:\GameServers\JavaMC\plugins", "kind": "plugins", "noun": "plugin" }
+```
+
+
+### Plugin updates
+
+`pluginUpdates` on the target turns the panel's list into something that can act
+on itself. It is off unless the block is present:
+
+```json
+"pluginUpdates": { "auto": true }
+```
+
+**Every plugin is matched to a publisher explicitly.** Common ones are in the
+catalogue in `src/pluginupdate.js`, keyed by the name in the plugin's own
+`plugin.yml`; anything else needs an entry under `sources`, and a plugin with no
+entry is listed as **no source** and never touched. Sources are never guessed by
+searching for a name, and that restraint is the point: Modrinth has a project
+called `veinminer` that is *not* Choco's VeinMiner, and a name-matching updater
+would quietly replace one plugin with an unrelated one.
+
+Five providers, each of which publishes a checksum alongside the download:
+
+| provider | needs | notes |
+| --- | --- | --- |
+| `geyser` | `project`, `download` | GeyserMC's build server — rolling builds, so the build number is the version |
+| `modrinth` | `project` slug | filtered to the `paper` loader |
+| `hangar` | `project`, `platform` | PaperMC's own host; a version hosted off Hangar is refused, since it publishes no checksum |
+| `github` | `repo`, `asset` | `asset` is a regex and must match exactly one jar in the release |
+| `url` | `url`, `sha256` | a fixed link; without a `sha256` it can only report **unknown**, never update |
+
+```json
+"sources": {
+  "MyPlugin":    { "provider": "modrinth", "project": "my-plugin" },
+  "ThirdPlugin": { "provider": "github", "repo": "owner/repo", "asset": "^ThirdPlugin-[0-9.]+[.]jar$" },
+  "Geyser-Spigot": false
+}
+```
+
+**Anchor the `asset` pattern.** A release usually ships more than one jar — a
+Fabric build, a sources jar, a shaded `original-` copy — and a pattern matching
+two of them is refused rather than resolved by guesswork, because picking the
+wrong one installs a plugin the server cannot load.
+
+#### What "is there an update?" actually compares
+
+The **published checksum against the jar on disk**, wherever the publisher
+offers one. Version strings cannot do that job: Geyser has called itself
+`2.11.2-SNAPSHOT` across more than a thousand builds, and comparing that against
+itself would report "current" forever. Where there is no checksum, versions are
+compared, and an installed version *ahead* of the release is left alone rather
+than downgraded.
+
+#### How an update is installed
+
+The same shape as the server jar update, for the same reasons:
+
+1. Resolve and download every outdated plugin **with the server still running**.
+2. Verify each against its published checksum. A jar that does not match is
+   deleted, not installed, and the server is never stopped for it.
+3. Stop once. Back up first if `backup.beforeRestart` is on.
+4. Swap all of them, then start. **N plugins cost one restart, not N.**
+
+The jar being replaced is copied to `data\plugin-updates\<target>\previous`
+first, three deep per plugin — that is the way back. A release that renames its
+file (`VeinMiner-Bukkit-2.4.0.jar` → `2.5.0.jar`) has the old file deleted after
+the new one is written, because two jars declaring the same plugin name is a
+server that loads one and refuses the other. If that delete fails, the update
+still stands and the panel flags the duplicate.
+
+`"auto": true` installs on the schedule instead of waiting for the button, and
+**only into an empty server** — a populated one is left alone and picked up by a
+later sweep, and an unknown player count does not count as empty. The plugin
+updater and the server-jar updater hold each other's lock: they both stop the
+server and write into the same install, so they never run at once.
+
+#### The game-version list is advisory
+
+`requireGameVersion` (default off) refuses a release that does not name the
+running Minecraft version. It is off because it refuses far more than it
+protects: at the time of writing every plugin on this box still lists `1.21.11`
+as its newest supported version while the server runs `26.2`. The mismatch is
+reported on the plugin either way.
 
 ---
 
@@ -609,10 +804,43 @@ export default {
   // transport 'none'. The target needs a queryPort — put one in defaults.
   // `names: false` skips the A2S_PLAYER round trip for games that answer it with
   // blank names; the count still comes from A2S_INFO. See icarus.js.
-  query: { protocol: 'a2s', names: true },
+  //
+  // `version: false` refuses the version string in the query reply, for games
+  // that send a placeholder there. Icarus answers "0.0.0.1" for every build it
+  // has ever shipped, and a confident wrong version on a card is worse than no
+  // version at all.
+  query: { protocol: 'a2s', names: true, version: true },
 
   // Filled in when config.json omits them.
   defaults: { gamePort: 27015, rconPort: 27015, queryPort: 27015 },
+
+  // Optional: the Version tile. Four sources, and a profile picks whichever one
+  // its game actually answers — the tile is simply absent for a game that
+  // publishes its version nowhere, rather than showing a permanent dash.
+  //
+  //   1. The query reply. Free, nothing to declare: A2S and RakNet both carry
+  //      the running build, and the monitor reads it unless `version: false`
+  //      above turns it down.
+  //   2. `versionCommand` + `parseVersion(body)` — one RCON call. See
+  //      minecraft.js, where `version` is a Bukkit/Spigot/Paper command that
+  //      vanilla does not have, so vanilla simply gets no tile.
+  //   3. `parseVersion(res)` on a transport:'rest' profile, fed the result of
+  //      `rest.info(target)`. See palworld.js.
+  //   4. `versionLog: { pattern, group }` — matched against the HEAD of the
+  //      target's logFile, for a version printed once in a startup banner and
+  //      offered nowhere else. This is the only source a transport:'none' game
+  //      can use. See icarus.js.
+  //
+  // All four are cached against the process start time, so they are read once
+  // per server run and re-read after a restart — this sits inside a 10-second
+  // poll loop, and a version cannot change while a process keeps running.
+  //
+  // parseVersion returning null means "ask again next poll" rather than "no
+  // version": Paper answers its first `version` call with "Checking version,
+  // please wait..." while it looks up whether a newer build exists, and only
+  // caching a real answer is what makes that resolve on the following poll.
+  versionCommand: 'version',
+  parseVersion: (body) => (body.match(/version\s+(\S+)/i) || [])[1] || null,
 
   commands: {
     list: 'players',
@@ -627,11 +855,44 @@ export default {
   // `danger: true` groups the command under a "Careful" heading and asks for
   // confirmation before running it. The console still accepts any command you
   // type, listed or not.
+  // A placeholder may be written inside quotes — "<name>" — when the game
+  // needs them to survive a space in the value. The quotes belong to the slot,
+  // so a suggested name arrives already wrapped in them.
   consoleCommands: [
     { command: 'players', description: 'Who is online' },
-    { command: 'kick <name>', description: 'Disconnect one player' },
+    { command: 'kick "<name>"', description: 'Disconnect one player' },
     { command: 'quit', description: 'Shut the server down', danger: true },
   ],
+
+  // Optional: what may go in each <placeholder> above. The console suggests
+  // one word at a time as it is typed — first the command, then this — so a
+  // list of fifty gamerules never has to fit in the dropdown.
+  //
+  // A list is either an array of options, or one of two live lists filled in
+  // from whoever is online at the time: '@players' for names, '@playerIds' for
+  // the ids parsePlayers found next to them. Which one a game wants is not a
+  // detail — ARK's kickplayer takes the id and will not take the name, while
+  // Minecraft is the other way round.
+  //
+  // An option is a bare string or { value, description, values }, where
+  // `values` is the list offered for the word *after* this one. That is how
+  // one placeholder can lead to different choices depending on what was
+  // picked: keepInventory offers true/false, randomTickSpeed offers numbers.
+  //
+  // `values` may also open a slot the command string never spelled out, as
+  // 'add' does below — though a branch that runs more than one word further,
+  // or that needs a quoted slot, reads better written out as its own
+  // consoleCommands line. A <placeholder> with no entry here is free text; a
+  // slot named <player>, <target> or <name> defaults to '@players', and one
+  // named <steamID>, <eosID>, <playerID>, <userID> or <entityID> to
+  // '@playerIds'.
+  argValues: {
+    difficulty: ['peaceful', 'easy', 'normal', 'hard'],
+    listAction: [
+      { value: 'show', description: 'Print the list' },
+      { value: 'add', description: 'Add a player', values: '@players' },
+    ],
+  },
 
   // Turn the raw reply to commands.list into [{ name, id }].
   parsePlayers(body) {
@@ -655,6 +916,15 @@ export default {
   //             relative to steamInstallDir) is the game's own list of which
   //             mods it will actually load, so the panel can tell an installed
   //             mod from a loaded one. See palworld.js.
+  // 'plugins'   Bukkit/Paper jars: one .jar in the folder is one plugin, and
+  //             its plugin.yml (inside the jar) supplies name, version, author,
+  //             api-version and dependencies. See minecraft.js. `candidates`
+  //             resolve against steamInstallDir where there is one and against
+  //             the folder holding startCommand where there is not, which is
+  //             what makes this work for a game Steam never installed.
+  //
+  // `noun` is what this game's community calls them -- 'plugin' for a Paper
+  // server -- and it retitles the panel. Defaults to 'mod'.
   //
   // A target can override all of this with its own `mods: { dir, kind }`.
   mods: {

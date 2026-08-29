@@ -2,8 +2,8 @@
 
 A single-page control panel for the game servers and Windows services running on
 one machine. Start, stop and restart them, see who's playing before you reboot on
-top of someone, schedule nightly restarts, take world backups, and get told when
-something crashes.
+top of someone, schedule nightly restarts, take world backups, keep them patched,
+and get told when something crashes.
 
 It runs on **Windows**, needs **Node 20+**, and has **one dependency** (Express).
 
@@ -41,6 +41,21 @@ Open <http://localhost:8770>.
 `config.json` and `.env` are gitignored, so your passwords never end up in a
 commit even if you fork this and push it back.
 
+### Where the game servers live
+
+**`C:\GameServers\` — not `C:\Apps\`.** Each server gets its own folder there
+(`Bedrock\`, `PalServer\`, `IcarusServer\`, `JavaMC\`), and that is what the
+`startCommand`, `logFile` and `backup.paths` on every target point at.
+
+`C:\Apps\` is for repos — this dashboard, ClearLedger — plus the third-party
+tooling they drive (`steamcmd\`, `nssm\`, `jdk25\`). Nothing in `C:\Apps\`
+holds a world or a save.
+
+The split matters because the two trees have opposite backup and update rules:
+`C:\Apps\` is disposable and re-clonable, while `C:\GameServers\` holds the
+only copy of everything players have built. Putting a server under `C:\Apps\`
+makes it look re-clonable when it is not.
+
 ---
 
 ## Configuration
@@ -77,6 +92,10 @@ that quietly can't authenticate.
 | `backups.zipTimeoutMinutes` | `20` | Ceiling on compressing, and on extracting during a restore |
 | `alerts.keep` | `200` | Alerts kept in the activity feed and `data/alerts.json` |
 | `restart.graceSeconds` | `90` | Extra time after a shutdown countdown before the process is force-killed |
+| `minecraft.checkMinutes` | `360` | How often to check for a new Minecraft version |
+| `minecraft.downloadTimeoutMinutes` | `30` | Ceiling on fetching a release |
+| `minecraft.extractTimeoutMinutes` | `15` | Ceiling on unpacking a Bedrock zip |
+| `minecraft.keepDownloads` | `false` | Keep the download instead of deleting it once installed |
 | `targets` | — | The servers to manage |
 
 **config.json takes comments.** `//` and `/* */` are stripped before parsing, so
@@ -106,6 +125,11 @@ have no reason to differ between installs.
 
 Most ports have sensible per-game defaults, so you can usually omit them. Omit
 `startCommand` and the Start button disappears rather than failing.
+
+`serverDir` is optional and only read by the bans panel, which needs the folder
+holding `banned-players.json`. It is derived from `logFile` — a log inside a
+`logs\` subfolder means the server root is its parent — so set it only when your
+layout puts the two somewhere that guess doesn't reach.
 
 > Windows paths in JSON need doubled backslashes (`C:\\Servers\\...`). Forward
 > slashes (`C:/Servers/...`) also work.
@@ -191,6 +215,96 @@ rather than shown broken. Everything this feature raises is tagged with the
 `update` alert category, so one entry in a channel's `mute` list keeps it out of
 chat while the activity feed still shows all of it.
 
+### Minecraft updates
+
+Minecraft is not on Steam, so `bedrock` and `minecraft` targets get the same
+**Check for update** button wired to a different mechanism — one that does the
+whole job rather than handing you over to another program. Nothing else owns a
+Minecraft install, so there is no second downloader to coordinate with, and the
+dashboard can simply do it:
+
+1. It asks the publisher what the current version is and compares it with what
+   is on disk. If you're already current, it says so and nothing else happens.
+2. If there is a newer one, the release is downloaded **while the server is
+   still running**, with a progress bar on the card, and checked against the
+   publisher's own checksum where there is one (Mojang signs its jars with
+   SHA-1, PaperMC with SHA-256). A file that doesn't match is not installed —
+   and because nothing has been touched yet, a failed download costs no
+   downtime at all.
+3. Only then is the server warned, saved, backed up if `beforeRestart` is set,
+   and **stopped** — Windows will not let anything replace a binary that a
+   running process holds open.
+4. The release is unpacked over the install and the server starts again. The
+   download is deleted last, once the server is back up.
+
+There is nothing to press in between, and no configuration needed to get there:
+the install folder is taken from `startCommand`, and the installed version is
+read from the server itself.
+
+**Bedrock** is a ~95 MB zip from minecraft.net that unpacks to about ten
+thousand files. It is extracted entry by entry rather than wholesale, so that
+four names the zip ships stock copies of can be stepped over:
+
+| Never overwritten | Why |
+|---|---|
+| `server.properties` | your settings — ports, difficulty, `allow-list` |
+| `allowlist.json`, `whitelist.json` | who may join. The shipped copy is empty |
+| `permissions.json` | who is an operator |
+| `worlds\` | the world |
+| `development_*_packs\` | packs you are working on |
+
+Nothing is ever **deleted**, either — an update only writes the names the zip
+contains — so add-on packs, scripts and anything else of your own survive it.
+`minecraftUpdate.keep` adds to the list above; end an entry with `/` to protect
+a whole folder. The vanilla `behavior_packs\` and `resource_packs\` are
+deliberately *not* protected: they hold the content for that exact server
+version, and holding them back while the binary moves forward is its own bug.
+
+**Java** is one file, which makes it simpler still: the server jar is replaced
+and nothing else is touched — your world, `server.properties` and `plugins\`
+were never part of the download. The jar that was replaced is kept under
+`data\mc-updates\<id>\`, so there is always a way back.
+
+```jsonc
+"minecraftUpdate": {
+  "flavor": "paper",   // "vanilla" (Mojang's jar) or "paper" (PaperMC builds)
+  "track": "same",     // "same", "latest", or a version to pin to
+  "auto": false
+}
+```
+
+`track` is the setting worth thinking about. **`same`** holds the Minecraft
+version you are on and takes newer builds of it; **`latest`** follows Minecraft
+releases. It defaults to `same` for Paper and `latest` for vanilla, because
+every plugin on a Paper server is built against one Minecraft version, and
+carrying them across a version bump unattended is how a server comes back up
+with half of them refusing to load. Vanilla has no plugins to break.
+
+Everything else is optional: `installDir` if the server isn't in the folder its
+start script lives in, `jar` if it isn't `server.jar`, and `preview` on Bedrock
+to follow the preview channel instead.
+
+#### Automatic updates
+
+`"auto": true` on a target installs a new version as soon as one appears **and
+the server is empty**. A populated one is left alone and picked up by a later
+sweep; only a confirmed zero counts, an unreadable player count is not an empty
+server. Off by default, and the six-hourly background check still raises an
+alert either way, so the update stays a decision rather than a surprise. It is a
+much safer proposition on Bedrock — which has no plugins to break — than on a
+modded Java server.
+
+The installed version is worked out from, in order: a marker the dashboard
+writes after each update, the version inside the jar (Java), and the version the
+server logs at startup. The marker is checked against the file it describes and
+thrown away if that file has changed underneath it, so a hand-installed update
+is noticed rather than papered over. If the version genuinely can't be read the
+card says so instead of guessing — and `auto` never fires on a comparison it
+couldn't make. Running one update from the dashboard settles it from then on.
+
+Like the Steam checks, everything here is tagged with the `update` alert
+category.
+
 ### Mods
 
 Every game card with a mods folder gets a **Mods** panel listing what is
@@ -217,16 +331,26 @@ different one with:
 ```
 
 Three flags mark a mod that needs a decision: **update waiting** (Steam has a
-newer copy — refresh it in your mod manager), **not subscribed** (installed here
-but with no source left, so it will never update again), and **not loaded**
-(installed, but missing from the game's own active mod list — the server is
-ignoring it). That last one is the most common "why isn't my mod working", and
-it is invisible from the folder alone.
+newer copy), **not subscribed** (installed here but with no source left, so it
+will never update again), and **not loaded** (installed, but missing from the
+game's own active mod list — the server is ignoring it). That last one is the
+most common "why isn't my mod working", and it is invisible from the folder
+alone.
 
-Nothing on this panel writes. The game itself can be updated unattended because
-`app_update` is verifiable and repairable; a mod is built against one game
-build, can take the server down on the first player join, and has no `validate`
-to undo it. So the dashboard reports, and a person decides. See
+**Refresh from Steam** acts on the first of those, for a `workshopMods` target
+with a `steamInstallDir`: it stops the server, copies the newer files the Steam
+client has already downloaded over the ones the mod manager installed, and
+starts it again. It runs only on a confirmed-empty server (an unknown player
+count is not an empty one), and the confirmation lists per mod what it will
+copy, what already matches, and what it is leaving alone.
+
+Its limits are the point, and they are what make it safe to press: only files
+the mod already installed are replaced, a destination edited since the install
+is never overwritten — UE4SS's hand-edited `mods.txt` is the reason — and every
+replaced file is kept under `data\mod-backups`. Deciding what a mod installs
+stays with the mod manager: installing, enabling and removing mods are still
+its job, because a mod is built against one game build, can take the server down
+on the first player join, and has no `validate` to undo it. See
 [docs/games.md](docs/games.md) for the Palworld and Icarus specifics.
 
 ### Watchdog — restart it when it crashes
@@ -268,6 +392,38 @@ happen while the server is stopped, so they're always complete.
 
 Restore is in the UI. It refuses unless the server is stopped and archives the
 current world first, so a restore of the wrong file is recoverable.
+
+### Bans and moderation
+
+Minecraft (Java) cards get a **Bans & moderation** panel: who is banned right
+now, and every kick, ban and pardon from the last seven days. No configuration —
+the panel appears when the game profile keeps bans in a format the dashboard
+understands and the server folder can be found next to the configured `logFile`.
+Set `serverDir` on the target if your layout puts them apart.
+
+The two halves work differently on purpose:
+
+- **Reading** comes off `banned-players.json`, which records who, when, by what
+  and why — where RCON `banlist` is one line of prose that drops the source and
+  the expiry. It also still answers when the server is down, which is exactly
+  when you want to know why somebody can't get in.
+- **Writing** always goes over RCON, never by editing that file. A running
+  server holds the ban list in memory and rewrites it on the next change, so a
+  hand-edited file is silently undone.
+
+The event feed is stitched from three sources, because no one of them is
+complete. Plugin and in-game actions are parsed out of the server log — the only
+record a *kick* leaves anywhere. Bans issued from this dashboard are recorded by
+the dashboard itself, because a command sent over RCON leaves no trace in the
+log at all. Repeated events, like a banned player retrying the connect button
+four times, collapse into one row with a count.
+
+Chat is discarded before any of that is parsed. A player can type "Was Banned
+For Spamming" in chat — one on this author's server did, moments after being
+unbanned — and it must not become an entry.
+
+Pardon is one click; it's the safe direction, and a mistake is undone by banning
+again. Ban asks first.
 
 ### Schedules
 
@@ -474,11 +630,12 @@ sc query ServerDashboard
 | Warn & restart | broadcasts at 15/10/5/1 min, then restarts. Cancellable |
 | Restart when empty | waits for the last player to leave, then restarts; gives up rather than restarting on top of players |
 | Broadcast | send a message to everyone in-game |
-| Console | raw RCON command box |
+| Console | raw RCON command box, with a menu of the commands this game knows and word-by-word suggestions as you type (pick `gamerule`, get the rules; pick a rule, get its values) |
 | Chart | 3h of player count; red bands are downtime |
 | Mods | what is installed: version, author, size, and a flag when one needs a decision |
 | Schedules | recurring jobs for this server |
 | Backups | run, download, restore |
+| Bans & moderation | who is banned, with one-click pardon; recent kicks, bans and pardons (Minecraft Java) |
 | Log tail | last 200 lines |
 
 Controls that a game can't support are hidden rather than shown and failing — a

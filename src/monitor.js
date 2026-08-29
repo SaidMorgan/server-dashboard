@@ -43,6 +43,12 @@ export class Monitor {
     this.actions = null;
     this.watchdogTimers = new Map(); // id -> pending restart timer
     this.logHealth = new Map();      // id -> {startedAt, verdict} per server run
+    // id -> {startedAt, version}. Keyed on the process start time so it is
+    // asked once per server run and re-asked after a restart, which is the only
+    // moment a running server's version can change. Without this, showing the
+    // version would mean an extra RCON round trip every ten seconds forever to
+    // re-learn a string that cannot have moved.
+    this.versions = new Map();
     this.restartLog = new Map();     // id -> [timestamps] for flap protection
 
     fs.mkdirSync(dataDir, { recursive: true });
@@ -204,6 +210,11 @@ export class Monitor {
       // and a tile that names the wrong system sends people to the wrong docs.
       queryProtocol: profile.query?.protocol ?? null,
       rcon: 'unknown',
+      // The build the running process reports about itself. Filled in from
+      // whichever source the game already answers -- the query reply, the REST
+      // info endpoint, or one cached RCON call -- and left null for a game that
+      // publishes it nowhere, which shows as a dash rather than a wrong number.
+      version: running ? (this.versions.get(target.id)?.version ?? null) : null,
       checkedAt: Date.now(),
     };
 
@@ -220,6 +231,16 @@ export class Monitor {
     // card that is not read out of the process table.
     if (profile.query && target.queryPort) {
       await this.#pollQuery(target, profile, snap, running);
+    }
+
+    // Some games announce their version once at startup and offer it nowhere
+    // else: no usable query field, and for a transport:'none' game no console
+    // to ask either. The log is then the only source, and reading it is
+    // independent of transport, so it belongs here rather than in one of the
+    // branches below -- which is also the only way Icarus reaches it at all,
+    // since transport:'none' returns a few lines further down.
+    if (running && !snap.version && profile.versionLog && target.logFile) {
+      this.#versionFromLog(target, profile.versionLog, snap);
     }
 
     // Games with no control interface at all (Valheim, "process"): there is
@@ -260,6 +281,7 @@ export class Monitor {
       if (res.ok) {
         snap.rcon = 'ok';
         snap.players = res.players;
+        await this.#pollVersion(target, profile, snap);
       } else {
         snap.rcon = 'error';
         snap.rconError = res.error;
@@ -280,11 +302,76 @@ export class Monitor {
     if (res.ok) {
       snap.rcon = 'ok';
       snap.players = profile.parsePlayers(res.body);
+      await this.#pollVersion(target, profile, snap);
     } else {
       snap.rcon = 'error';
       snap.rconError = res.error;
     }
     return snap;
+  }
+
+  // The version a game printed when it started. Reads the HEAD of the log, not
+  // the tail that #checkLogHealth wants: a startup banner is the first thing in
+  // the file and scrolls out of a tail window within minutes of a busy server
+  // running. Cached on the process start time like everything else here, so a
+  // 1 MB log is read once per run rather than every ten seconds.
+  #versionFromLog(target, spec, snap) {
+    const cached = this.versions.get(target.id);
+    if (cached && cached.startedAt === snap.startedAt) {
+      snap.version = cached.version;
+      return;
+    }
+    try {
+      const size = fs.statSync(target.logFile).size;
+      const span = Math.min(size, 512 * 1024);
+      const fd = fs.openSync(target.logFile, 'r');
+      const buf = Buffer.alloc(span);
+      fs.readSync(fd, buf, 0, span, 0);
+      fs.closeSync(fd);
+      const m = buf.toString('utf8').match(spec.pattern);
+      if (!m) return; // still starting, or the banner moved — try again next poll
+      snap.version = m[spec.group ?? 1];
+      this.versions.set(target.id, { startedAt: snap.startedAt, version: snap.version });
+    } catch { /* an unreadable log costs a label, nothing else */ }
+  }
+
+  // The running build, for the games that will only say so if asked. Games with
+  // a query answer this for free in #pollQuery and never reach here.
+  //
+  // Deliberately after the player list and never before it: this is the least
+  // important thing on the card, so it must not be what fails a snapshot. A
+  // server that refuses the question keeps every other tile, and the cache is
+  // left empty so the next poll tries again -- a version that arrives one cycle
+  // late is invisible, whereas a card stuck on "error" is not.
+  async #pollVersion(target, profile, snap) {
+    const cached = this.versions.get(target.id);
+    if (cached && cached.startedAt === snap.startedAt) {
+      snap.version = cached.version;
+      return;
+    }
+
+    let version = null;
+    try {
+      if (profile.transport === 'rest') {
+        if (!profile.rest?.info) return;
+        const res = await profile.rest.info(target);
+        if (res.ok) version = profile.parseVersion?.(res) ?? null;
+      } else {
+        if (!profile.versionCommand) return;
+        const res = await rconCommand({
+          host: target.host,
+          port: target.rconPort,
+          password: target.rconPassword,
+          command: profile.versionCommand,
+          mode: profile.transport,
+        });
+        if (res.ok) version = profile.parseVersion?.(res.body) ?? null;
+      }
+    } catch { /* see above: never fatal to the snapshot */ }
+
+    if (!version) return;
+    snap.version = version;
+    this.versions.set(target.id, { startedAt: snap.startedAt, version });
   }
 
   // A read-only player-count query over UDP, in whichever dialect the profile
@@ -323,6 +410,16 @@ export class Monitor {
     snap.playerCount = info.players;
     snap.responseMs = info.ms;
     snap.serverName = info.name || null;
+    // Free: both dialects carry the running build in the reply they already
+    // sent. This is the version the server is *actually* running, which is the
+    // one worth showing -- what is on disk can differ from what is in memory
+    // for the whole window between an update landing and the next restart.
+    //
+    // `version: false` on a profile's query block means the field is there but
+    // is a placeholder (Icarus answers a flat "0.0.0.1" for every build ever
+    // shipped). A wrong version is worse than none: it reads as authoritative
+    // and there is nothing on the card to suggest otherwise.
+    if (info.version && profile.query.version !== false) snap.version = info.version;
     // A server that reports its own limit is a better source than a hand-typed
     // maxPlayers, but only when the config left it out — an admin who wrote a
     // number there gets to keep it.

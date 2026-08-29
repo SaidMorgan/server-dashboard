@@ -47,11 +47,12 @@
 
       <div class="mods-banner hidden">
         <span class="mods-text"></span>
+        <button class="mini mods-install hidden">Refresh mods</button>
       </div>
 
       <div class="update-banner hidden">
         <span class="update-text"></span>
-        <button data-act="steamCancel" class="mini update-cancel hidden">Start it anyway</button>
+        <button data-act="updateCancel" class="mini update-cancel hidden">Start it anyway</button>
       </div>
 
       <div class="section players-list">
@@ -70,7 +71,7 @@
           <button data-act="start" class="btn good">Start</button>
           <button data-act="restart" class="btn warn">Restart now</button>
           <button data-act="updateRestart" class="btn warn" title="Run the update command, then restart">Update &amp; restart</button>
-          <button data-act="steamUpdate" class="btn warn game-only" title="Ask Steam whether there is a newer build. If there is, the server stops so you can install it in Steam, and starts itself again afterwards.">Check for update</button>
+          <button data-act="updateBegin" class="btn warn game-only" title="Ask the publisher whether there is a newer version. If there is, the server stops so it can be installed, and starts itself again afterwards. Minecraft is downloaded and installed by the dashboard; a Steam game waits for you to press Update in Steam.">Check for update</button>
           <button data-act="stop" class="btn bad">Stop</button>
           <button data-act="save" class="btn game-only">Save world</button>
         </div>
@@ -98,9 +99,12 @@
           </select>
         </div>
         <div class="cmd-help hidden"></div>
-        <div class="btnrow">
-          <input class="rcon-input" type="text" placeholder="e.g. listplayers" spellcheck="false" />
+        <div class="btnrow cmd-typeahead">
+          <input class="rcon-input" type="text" placeholder="e.g. listplayers" spellcheck="false"
+                 autocomplete="off" autocapitalize="off" autocorrect="off" role="combobox"
+                 aria-expanded="false" aria-autocomplete="list" />
           <button class="btn rcon-send">Run</button>
+          <ul class="cmd-suggest hidden" role="listbox"></ul>
         </div>
       </div>
 
@@ -180,13 +184,33 @@
       </details>
 
       <details class="section mods game-only">
-        <summary>Mods <span class="mods-count"></span></summary>
+        <summary><span class="mods-label">Mods</span> <span class="mods-count"></span></summary>
         <div class="btnrow">
           <button class="btn mini-btn mods-refresh">Re-read from disk</button>
+          <button class="btn mini-btn mods-install hidden">Refresh from Steam</button>
+          <button class="btn mini-btn plugins-update hidden">Update plugins</button>
           <span class="mods-status"></span>
         </div>
         <ul class="modlist"></ul>
         <div class="mods-where"></div>
+      </details>
+
+      <details class="section moderation game-only">
+        <summary>Bans &amp; moderation <span class="ban-count"></span></summary>
+
+        <div class="btnrow ban-add">
+          <input class="ban-name" type="text" placeholder="Player name" spellcheck="false"
+                 autocomplete="off" autocapitalize="off" autocorrect="off" />
+          <input class="ban-reason" type="text" placeholder="Reason (optional)" />
+          <button class="btn bad ban-do">Ban</button>
+        </div>
+        <div class="mod-status"></div>
+
+        <h4 class="mod-head">Banned players</h4>
+        <ul class="banlist"></ul>
+
+        <h4 class="mod-head">Recent kicks &amp; bans</h4>
+        <ul class="modevents"></ul>
       </details>
 
       <details class="section backups">

@@ -32,6 +32,42 @@ export const QUERY_PROTOCOLS = ['a2s', 'raknet'];
 
 const registry = new Map();
 
+// One list of suggestions, from a profile that may have written it the short
+// way. Accepts '@players', a bare array of strings, or full option objects, and
+// throws away anything it cannot make sense of rather than shipping it to the
+// browser. Depth is capped because `values` nests: a rule offers values, and
+// each of those could in principle offer more.
+function normalizeOptions(list, depth = 0) {
+  if (list === '@players') return '@players';
+  if (!Array.isArray(list) || depth > 4) return null;
+  const rows = list
+    .map((o) => (typeof o === 'string' ? { value: o } : o))
+    .filter((o) => o && typeof o.value === 'string' && o.value.trim())
+    .map((o) => {
+      const row = { value: o.value.trim() };
+      if (typeof o.description === 'string' && o.description) row.description = o.description;
+      const next = normalizeOptions(o.values, depth + 1);
+      if (next) row.values = next;
+      return row;
+    });
+  return rows.length ? rows : null;
+}
+
+function normalizeArgValues(argValues, id, where) {
+  if (!argValues) return {};
+  if (typeof argValues !== 'object' || Array.isArray(argValues)) {
+    console.error(`[games] "${id}"${where}: argValues must be an object — ignoring it`);
+    return {};
+  }
+  const out = {};
+  for (const [name, list] of Object.entries(argValues)) {
+    const rows = normalizeOptions(list);
+    if (rows) out[name] = rows;
+    else console.error(`[games] "${id}"${where}: argValues.${name} is not a usable option list — ignoring it`);
+  }
+  return out;
+}
+
 function register(profile, origin) {
   const where = origin ? ` (${origin})` : '';
   if (!profile || typeof profile !== 'object') {
@@ -52,6 +88,7 @@ function register(profile, origin) {
     defaults: {},
     commands: null,
     consoleCommands: [],
+    argValues: {},
     rest: null,
     restVerbs: null,
     query: null,
@@ -95,6 +132,13 @@ function register(profile, origin) {
       description: typeof c.description === 'string' ? c.description : '',
       danger: Boolean(c.danger),
     }));
+
+  // Suggestion options for the <placeholders> in those commands. Cosmetic in
+  // the same way, and normalized here so the browser can trust the shape: a
+  // list is either the string '@players' (filled in live from whoever is
+  // online) or an array of { value, description, values } rows, where `values`
+  // is what the *next* word after this one may be.
+  normalized.argValues = normalizeArgValues(normalized.argValues, normalized.id, where);
 
   registry.set(normalized.id, normalized);
   return normalized;

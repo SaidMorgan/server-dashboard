@@ -24,10 +24,18 @@
 //               folder. There is no manifest, so the file itself is the record:
 //               name, size, and when it was written. This is Icarus, and most
 //               other UE dedicated servers with loose-file mod support.
+//   plugins  -- a Bukkit/Paper server, where one jar in plugins\ is one plugin
+//               and its plugin.yml is inside that jar. This is Minecraft. The
+//               manifest is real and worth opening the zip for (see
+//               src/pluginjar.js): a plugin's api-version says which Minecraft
+//               version it was built against, which is the whole question when
+//               deciding whether the server can move to a new one.
 import fs from 'node:fs';
 import path from 'node:path';
 
 import { compare } from './workshop.js';
+import { readPluginJar } from './pluginjar.js';
+import { winPath } from './win.js';
 
 // Unreal packages a mod as one or more of these. .pak is the content; .utoc and
 // .ucas are the IoStore pair that newer engine versions split it into, and a mod
@@ -45,8 +53,19 @@ const MAX_WALK_ENTRIES = 5000;
 // profile ships candidates rather than one path because a game usually has more
 // than one place it will load mods from, and only the user knows which one their
 // mod manager writes to.
+function installRoot(target) {
+  // steamInstallDir is the answer for anything SteamCMD put on disk. Minecraft
+  // is not a Steam game and has no such key, so fall back to the folder the
+  // start command lives in -- the same derivation src/mcupdate.js makes, and
+  // true for the same reason: a server's launcher sits in its install folder
+  // because that is where the working directory has to be.
+  if (target.steamInstallDir) return target.steamInstallDir;
+  if (target.startCommand) return path.dirname(path.resolve(winPath(target.startCommand)));
+  return null;
+}
+
 function resolveCandidates(target, candidates) {
-  const root = target.steamInstallDir;
+  const root = installRoot(target);
   if (!root || !Array.isArray(candidates)) return [];
   return candidates.map((rel) => path.resolve(root, rel));
 }
@@ -65,6 +84,7 @@ export function modSource(target, profile) {
       candidates: [target.mods.dir],
       enabledFrom: target.mods.enabledFrom ?? null,
       note: target.mods.note ?? profile?.mods?.note ?? null,
+      noun: target.mods.noun ?? profile?.mods?.noun ?? null,
       appId: target.workshopMods?.appId ?? null,
       workshopDir: target.workshopMods?.workshopDir ?? null,
       modsDir: target.mods.dir,
@@ -103,6 +123,7 @@ export function modSource(target, profile) {
       exists: Boolean(found),
       enabledFrom: null,
       note: guess.note ?? null,
+      noun: guess.noun ?? null,
     };
   }
 
@@ -336,6 +357,140 @@ function readPaks(source) {
   return { ok: true, kind: 'paks', dir, mods, checkedAt: Date.now() };
 }
 
+// A Bukkit/Paper server. One jar in plugins\ is one plugin, and unlike a loose
+// pak it carries a real manifest -- so this is the one non-Steam layout that can
+// report a version, an author and a dependency list without guessing.
+//
+// Three states that the folder listing alone would hide, and that are each
+// somebody's afternoon when they go unnoticed:
+//
+//   disabled   -- Paper loads *.jar and nothing else, so the usual way to turn a
+//                 plugin off is to rename it to .jar.disabled. That is a file
+//                 sitting in the folder doing nothing, and it looks installed.
+//   staged     -- a plugin that updates itself drops the new jar into the update
+//                 folder, and it is copied over the old one at the NEXT restart.
+//                 Until then the version on the card is not the version that
+//                 will be running tomorrow.
+//   conflict   -- two jars declaring the same plugin name (the usual cause: a
+//                 new version dropped in without deleting the old one). Paper
+//                 loads one and refuses the other, and which one it picks is not
+//                 something to rely on.
+function readPlugins(source) {
+  const dir = source.dir;
+  if (!dir || !fs.existsSync(dir)) {
+    return {
+      ok: true,
+      kind: 'plugins',
+      dir,
+      mods: [],
+      missing: true,
+      candidates: source.candidates || [dir],
+      checkedAt: Date.now(),
+    };
+  }
+
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    return { ok: false, error: `could not list ${dir}: ${err.message}` };
+  }
+
+  // Everything a plugin updater has staged for the next restart, keyed by the
+  // filename it will land as. The folder is named in bukkit.yml and is "update"
+  // on every install that has not changed it.
+  const staged = new Map();
+  const updateDir = path.join(dir, readUpdateFolder(path.dirname(dir)));
+  try {
+    for (const e of fs.readdirSync(updateDir, { withFileTypes: true })) {
+      if (e.isFile() && e.name.toLowerCase().endsWith('.jar')) {
+        staged.set(e.name.toLowerCase(), path.join(updateDir, e.name));
+      }
+    }
+  } catch { /* no update folder is the normal case */ }
+
+  const mods = [];
+  for (const e of entries) {
+    if (!e.isFile()) continue; // plugins\<Name>\ is a plugin's config, not a plugin
+    const lower = e.name.toLowerCase();
+
+    // .jar is loaded; the .disabled/.bak/.old spellings are the same jar parked.
+    // Anything else in here (a yml, a txt) is not a plugin at all.
+    const off = /\.jar\.(disabled|bak|old)$/.test(lower);
+    if (!lower.endsWith('.jar') && !off) continue;
+
+    const file = path.join(dir, e.name);
+    let stat;
+    try { stat = fs.statSync(file); } catch { continue; }
+
+    const meta = readPluginJar(file) || {};
+    const base = e.name.replace(/\.jar(\.(disabled|bak|old))?$/i, '');
+    const pending = staged.get(lower);
+
+    mods.push({
+      name: meta.name || base,
+      // The manifest name is the name the server, the logs and every /plugins
+      // listing use. The filename is what you go and delete, so keep both.
+      displayName: meta.name || base,
+      file: e.name,
+      version: meta.version ?? null,
+      author: meta.authors?.length ? meta.authors.join(', ') : null,
+      apiVersion: meta.apiVersion ?? null,
+      description: meta.description ?? null,
+      // depend is required-to-load; softdepend only fixes the load order, so
+      // listing it as "needs" would be a lie the panel keeps repeating.
+      dependencies: meta.depend ?? [],
+      tags: [],
+      workshopId: null,
+      installedAt: Math.round(stat.mtimeMs),
+      sourceAt: pending ? Math.round(safeMtime(pending)) : null,
+      status: pending ? 'staged' : 'present',
+      staleWhy: pending
+        ? 'A newer jar is waiting in the update folder. Paper installs it over this one the next time the server starts.'
+        : null,
+      // false only for a jar that has been renamed out of the way -- an explicit
+      // "installed but not loading", which is exactly what enabled: false means
+      // everywhere else on this panel. A normal .jar is loaded, so: true.
+      enabled: !off,
+      disabledWhy: off
+        ? `Renamed to ${e.name}, so Paper does not load it — it only loads *.jar. Rename it back to enable it.`
+        : null,
+      bytes: stat.size,
+      fileCount: 1,
+    });
+  }
+
+  // Same manifest name from two different jars: flagged on both, because the
+  // fix is to decide which one to delete and neither is the obvious one.
+  const byName = new Map();
+  for (const m of mods) {
+    if (!m.enabled) continue; // a parked jar is not competing for the name
+    byName.set(m.name.toLowerCase(), (byName.get(m.name.toLowerCase()) || 0) + 1);
+  }
+  for (const m of mods) {
+    if (m.enabled && byName.get(m.name.toLowerCase()) > 1) m.conflict = true;
+  }
+
+  mods.sort((a, b) => a.displayName.localeCompare(b.displayName));
+  return { ok: true, kind: 'plugins', dir, mods, checkedAt: Date.now() };
+}
+
+// Which folder a self-updating plugin stages its new jar in. Configurable in
+// bukkit.yml and never actually configured, but reading it is three lines and
+// beats hardcoding a path that would silently stop finding anything.
+function readUpdateFolder(installDir) {
+  try {
+    const text = fs.readFileSync(path.join(installDir, 'bukkit.yml'), 'utf8');
+    const m = text.match(/^\s*update-folder:\s*(\S+)\s*$/m);
+    if (m) return m[1].replace(/^['"]|['"]$/g, '');
+  } catch { /* no bukkit.yml yet: the server has not started once */ }
+  return 'update';
+}
+
+function safeMtime(file) {
+  try { return fs.statSync(file).mtimeMs; } catch { return 0; }
+}
+
 // --- entry point ------------------------------------------------------------
 
 // Everything the Mods panel needs for one target. Never throws: a mod folder
@@ -347,23 +502,37 @@ export function inventory(target, profile) {
     return { ok: true, configured: false, mods: [], note: profile?.mods?.note ?? null };
   }
 
+  const readers = {
+    workshop: () => readWorkshop(source, target),
+    plugins: () => readPlugins(source),
+    paks: () => readPaks(source),
+  };
+
   let res;
   try {
-    res = source.kind === 'workshop' ? readWorkshop(source, target) : readPaks(source);
+    res = (readers[source.kind] ?? readers.paks)();
   } catch (err) {
     res = { ok: false, error: err.message };
   }
 
+  // What these things are called, in the words the game's own community uses.
+  // "Mods (8)" on a Paper server is wrong in a way that matters: you would go
+  // looking for a mods folder, and there is not one.
+  const noun = source.noun ?? (source.kind === 'plugins' ? 'plugin' : 'mod');
+
   if (!res.ok) {
-    return { ok: false, configured: true, kind: source.kind, dir: source.dir, error: res.error, mods: [] };
+    return { ok: false, configured: true, kind: source.kind, noun, dir: source.dir, error: res.error, mods: [] };
   }
 
   const counts = {
     total: res.mods.length,
-    stale: res.mods.filter((m) => m.status === 'stale').length,
+    // "staged" is the plugin-side spelling of stale -- something newer is
+    // waiting -- so it lands in the same count and the same banner.
+    stale: res.mods.filter((m) => m.status === 'stale' || m.status === 'staged').length,
     unsubscribed: res.mods.filter((m) => m.status === 'unsubscribed').length,
     disabled: res.mods.filter((m) => m.enabled === false).length,
+    conflicts: res.mods.filter((m) => m.conflict).length,
   };
 
-  return { ...res, configured: true, counts, note: source.note ?? null };
+  return { ...res, configured: true, noun, counts, note: source.note ?? null };
 }

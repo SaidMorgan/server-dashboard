@@ -124,7 +124,26 @@ export async function queryInfo({ host, port, timeoutMs = DEFAULT_TIMEOUT_MS }) 
     const players = r.u8();
     const maxPlayers = r.u8();
     const bots = r.u8();
-    return { ok: true, name, map, players, maxPlayers, bots, ms: Date.now() - started };
+
+    // The version string is four bytes further on and costs nothing to read --
+    // it is in the reply either way. Everything between is a single byte, so
+    // this cannot drift out of step the way a length-prefixed field could.
+    //
+    // Wrapped on its own because it is the one field here that is optional in
+    // practice: a server that stops early leaves the count intact rather than
+    // failing the whole query over a label. (The Ship inserts three extra
+    // fields before this; no game on this dashboard is The Ship, and guessing
+    // wrong would only mean a blank version.)
+    let version = '';
+    try {
+      r.u8(); // server type — d dedicated, l listen, p SourceTV
+      r.u8(); // environment — w Windows, l Linux, m Mac
+      r.u8(); // visibility — 0 public, 1 private
+      r.u8(); // VAC — 0 off, 1 on
+      version = r.str();
+    } catch { /* older or truncated reply: the count above still stands */ }
+
+    return { ok: true, name, map, players, maxPlayers, bots, version, ms: Date.now() - started };
   } catch (err) {
     return { ok: false, error: `could not parse the reply (${err.message})` };
   }

@@ -28,7 +28,23 @@ export default {
   query: {
     protocol: 'a2s',
     names: false,
+    // Icarus fills the A2S version field with a flat "0.0.0.1" and has done
+    // through every build it has shipped. Taking it would put a confident,
+    // permanently wrong number on the card, so it is refused here and the real
+    // one is read out of the log below instead.
+    version: false,
   },
+
+  // "====> Version: 3.0.25.156508-Shipping-DangerousHorizons <===="
+  //
+  // Only the numeric part is kept: the suffix is the build flavour and the
+  // release's codename, which change with every content drop and would make the
+  // tile wrap. LogIcarusGameInstance prints this once, early, which is why the
+  // monitor reads the head of this log rather than the tail.
+  //
+  // Not to be confused with the two "Version: 4.27.x" lines just above it in
+  // the same file — those are the Unreal Engine build, not the game.
+  versionLog: { pattern: /====>\s*Version:\s*([\d.]+)/ },
 
   defaults: {
     // Both UDP. The query port is a real Steam game server query port, not

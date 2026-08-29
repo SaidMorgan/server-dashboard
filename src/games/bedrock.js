@@ -21,6 +21,8 @@
 // (src/raknet.js), which is free and needs no auth. RCON adds the *names* the
 // ping cannot carry, plus broadcast, save and a genuine clean shutdown.
 
+import { bedrockGamerules } from './gamerules.js';
+
 export default {
   id: 'bedrock',
   label: 'Minecraft (Bedrock)',
@@ -83,20 +85,58 @@ export default {
     { command: 'save query', description: 'Ask whether the held save has finished' },
     { command: 'save resume', description: 'Resume normal saving after save hold' },
     { command: 'say <message>', description: 'Server message in everyone\'s chat' },
-    { command: 'tell <player> <message>', description: 'Private message to one player' },
-    { command: 'kick <player>', description: 'Disconnect one player; they can rejoin' },
-    { command: 'allowlist list', description: 'Show the allow list' },
-    { command: 'allowlist add <player>', description: 'Let a player onto an allow-listed server' },
+    { command: 'tell "<player>" <message>', description: 'Private message to one player' },
+    { command: 'kick "<player>"', description: 'Disconnect one player; they can rejoin' },
+    // Spelled out one shape per line rather than behind a single
+    // <allowlistAction> slot, the way the Java profile writes its whitelist.
+    // Bedrock gamertags may contain spaces, so the name has to arrive quoted,
+    // and quotes belong to a slot in the command -- a list of values carried
+    // over from the word before cannot add them.
+    { command: 'allowlist list', description: 'Show who is on the allow list' },
+    { command: 'allowlist add "<player>"', description: 'Let a player onto an allow-listed server' },
+    { command: 'allowlist remove "<player>"', description: 'Take a player off the allow list' },
+    { command: 'allowlist on', description: 'Enforce the allow list — with an empty list this locks everyone out, including you', danger: true },
+    { command: 'allowlist off', description: 'Stop enforcing the allow list' },
     { command: 'allowlist reload', description: 'Re-read allowlist.json from disk' },
     { command: 'permission list', description: 'Show operator permissions' },
-    { command: 'op <player>', description: 'Grant operator rights' },
-    { command: 'deop <player>', description: 'Remove operator rights' },
-    { command: 'time set day', description: 'Set the world to morning' },
-    { command: 'weather clear', description: 'Stop rain and storms' },
-    { command: 'difficulty <peaceful|easy|normal|hard>', description: 'Change the difficulty' },
-    { command: 'gamerule showcoordinates true', description: 'Show coordinates on everyone\'s HUD' },
+    { command: 'op "<player>"', description: 'Grant operator rights' },
+    { command: 'deop "<player>"', description: 'Remove operator rights' },
+    { command: 'gamemode <gamemode> "<player>"', description: 'Change what mode a player is in' },
+    { command: 'gamerule <gamerule> <value>', description: 'Read or set one of the world rules' },
+    { command: 'time set <time>', description: 'Set the time of day' },
+    { command: 'weather <weather>', description: 'Change the weather' },
+    { command: 'difficulty <difficulty>', description: 'Change the difficulty' },
     { command: 'stop', description: 'Save and shut the server down — it will not come back on its own', danger: true },
   ],
+
+  // Options for the <placeholders> above, so the console can suggest the next
+  // word rather than leaving a name to be remembered. An option's own `values`
+  // are what the slot *after* it offers, which is how a gamerule decides
+  // whether the next box is true/false or a number. <player> is not listed:
+  // the console fills that one from whoever is actually online.
+  argValues: {
+    gamerule: bedrockGamerules,
+    difficulty: ['peaceful', 'easy', 'normal', 'hard'],
+    gamemode: [
+      { value: 'survival', description: 'Normal play' },
+      { value: 'creative', description: 'Flight, no damage, unlimited blocks' },
+      { value: 'adventure', description: 'Cannot break blocks without the right tool' },
+      { value: 'spectator', description: 'Fly through walls, touch nothing' },
+    ],
+    time: [
+      { value: 'day', description: 'Morning, 1000 ticks' },
+      { value: 'noon', description: 'Midday, 6000 ticks' },
+      { value: 'night', description: 'Dusk, 13000 ticks' },
+      { value: 'midnight', description: 'Middle of the night, 18000 ticks' },
+      { value: 'sunrise', description: 'First light, 23000 ticks' },
+      { value: 'sunset', description: 'Last light, 12000 ticks' },
+    ],
+    weather: [
+      { value: 'clear', description: 'Stop rain and storms' },
+      { value: 'rain', description: 'Start rain' },
+      { value: 'thunder', description: 'Start a thunderstorm' },
+    ],
+  },
 
   // "There are 2/10 players online:" and then the names on the FOLLOWING line,
   // which is where this differs from Java's single-line reply. The /s flag is
@@ -126,10 +166,20 @@ export default {
     'to the internet — only the UDP game port should be forwarded.',
     ' ',
 
-    'Bedrock is not on Steam and has no SteamCMD app id: updates are a manual',
-    'download of a new zip from minecraft.net, unzipped over the install. Keep',
-    'worlds/, server.properties, allowlist.json and permissions.json — the zip',
-    'ships stock copies of all four and will overwrite them.',
+    'Bedrock is not on Steam and has no SteamCMD app id, so the Steam build check',
+    'has nothing to read here. "Check for update" on the card is a different',
+    'thing that does the whole job instead: it asks minecraft.net for the current',
+    'version, and if this one is older it stops the server, downloads the zip,',
+    'unpacks it over the install, deletes the zip and starts the server again.',
+    'server.properties, allowlist.json, whitelist.json and permissions.json are',
+    'never overwritten — the zip ships stock copies of all four — and neither are',
+    'worlds/ or the development_* folders. Nothing is deleted either, so add-on',
+    'packs and scripts of your own survive. See src/mcupdate.js.',
+    ' ',
+
+    'Set "minecraftUpdate": { "auto": true } on the target to have that happen by',
+    'itself when a version lands and nobody is online. It is a safer proposition',
+    'here than on a modded Java server: Bedrock has no plugins to break.',
     ' ',
 
     'The shipped server.properties has allow-list=true, so a brand new server',

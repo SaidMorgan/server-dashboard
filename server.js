@@ -12,9 +12,12 @@ import { Backups } from './src/backup.js';
 import { Notifier } from './src/notify.js';
 import { Scheduler, describeCron, nextRun } from './src/scheduler.js';
 import { SteamUpdates } from './src/steam.js';
+import { MinecraftUpdates } from './src/mcupdate.js';
+import { PluginUpdates } from './src/pluginupdate.js';
 import { WorkshopMods } from './src/workshop.js';
 import { inventory as modInventory, modSource } from './src/mods.js';
 import { closeAll } from './src/rcon.js';
+import * as moderation from './src/moderation.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(here, 'public');
@@ -53,18 +56,32 @@ const backups = new Backups(config, monitor, actions);
 const notifier = new Notifier(config);
 const scheduler = new Scheduler(config, monitor, actions, backups, config.dataDir);
 const steam = new SteamUpdates(config, monitor, config.dataDir);
-const workshop = new WorkshopMods(config, monitor);
+// Minecraft is not on Steam, so its updates are a different publisher, a
+// different comparison and -- because nothing else owns the install -- a
+// download the dashboard can perform itself. See src/mcupdate.js.
+const mcupdates = new MinecraftUpdates(config, monitor, config.dataDir);
+const workshop = new WorkshopMods(config, monitor, config.dataDir);
+// The other half of a Paper install: the jars in plugins\, each from its own
+// publisher. Separate from mcupdates because the server jar and the plugins
+// move on different schedules -- and must never move at the same moment, which
+// is what the otherBusy wiring below prevents. See src/pluginupdate.js.
+const pluginupdates = new PluginUpdates(config, monitor, config.dataDir);
 
-// These four know about each other, so the wiring happens here rather than
-// through constructor arguments that would be circular.
+// These know about each other, so the wiring happens here rather than through
+// constructor arguments that would be circular.
 actions.backups = backups;
 monitor.attach({ actions, notifier });
 steam.attach({ actions });
+mcupdates.attach({ actions, otherBusy: (id) => pluginupdates.busy.has(id) });
+workshop.attach({ actions });
+pluginupdates.attach({ actions, otherBusy: (id) => mcupdates.busy.has(id) });
 
 monitor.start();
 scheduler.start();
 steam.start();
+mcupdates.start();
 workshop.start();
+pluginupdates.start();
 
 const app = express();
 app.set('trust proxy', true);
@@ -107,25 +124,50 @@ const publicTarget = (t) => {
     // so instead of rendering an empty one.
     hasPlayerNames: Boolean(profile && (profile.transport !== 'none' || profile.query?.names)),
     consoleCommands: profile?.consoleCommands ?? [],
+    // Options for the <placeholders> inside those commands, so the console can
+    // suggest the next word as it is typed. Sent whole rather than queried per
+    // keystroke: it is a few KB of static data per game and the alternative is
+    // a round trip between letters.
+    consoleArgs: profile?.argValues ?? {},
     canStart: Boolean(t.startCommand) || t.kind === 'service',
     canUpdate: t.kind === 'service' && Boolean(t.preRestartCommand),
-    // Only offered when a Steam manifest for this app was actually found on
-    // disk. A hand-copied install has nothing to read, so it gets no button
-    // instead of one that can only ever explain why it doesn't work.
-    canSteamUpdate: steam.managed(t.id),
-    // Workshop mods are reported, never installed, so this only decides whether
-    // the card can show a mod line at all.
+    // Only offered when there is genuinely something to compare against: a
+    // Steam manifest for this app on disk, or a Minecraft install the updater
+    // could find the server binary in. A hand-copied install has nothing to
+    // read, so it gets no button instead of one that can only ever explain why
+    // it doesn't work. Which of the two answers yes also decides what pressing
+    // the button does -- see the update actions below.
+    canCheckUpdate: steam.managed(t.id) || mcupdates.managed(t.id),
+    // Which one, so the confirmation can describe what pressing the button
+    // actually does. The two are not the same promise: a Minecraft update is
+    // downloaded and installed start to finish, while a Steam one stops the
+    // server and hands you over to Steam.
+    updateProvider: mcupdates.managed(t.id) ? 'minecraft' : steam.managed(t.id) ? 'steam' : null,
+    // Workshop mods are reported, never installed by the background sweep, so
+    // this only decides whether the card can show a mod line at all.
     hasModChecks: workshop.managed(t.id),
+    // Whether the card also gets the button that acts on that line. It needs an
+    // install folder to copy into and a way to start the server again; without
+    // both the notice stands on its own, as it always did.
+    canRefreshMods: workshop.canRefresh(t.id),
     // Separate from hasModChecks: the update comparison needs a Steam Workshop
     // subscription to compare against, while simply listing what is installed
     // works for any game with a mods folder -- including one whose mods come
     // from mod.io, where there is nothing to compare.
     hasMods: Boolean(modSource(t, profile)),
+    // A Paper server whose plugins folder exists and which has at least one
+    // plugin the dashboard knows a publisher for. Without this the panel is
+    // still a list -- it just has nothing to press.
+    canUpdatePlugins: pluginupdates.managed(t.id),
     gamePort: t.gamePort ?? null, rconPort: t.rconPort ?? null,
     queryPort: t.queryPort ?? null,
     maxPlayers: t.maxPlayers ?? null, serviceName: t.serviceName ?? null,
     healthUrl: t.healthUrl ?? null, hasLog: Boolean(t.logFile || t.logDir),
     hasBackup: Boolean(t.backup?.enabled && t.backup?.paths?.length),
+    // A ban list the dashboard can both read and change. Needs the game profile
+    // to keep bans in a format it understands *and* the server folder to be
+    // findable -- see src/moderation.js, which owns both halves of that answer.
+    canModerate: t.kind === 'game' && moderation.managed(t, getProfile(t.game)),
   };
 };
 
@@ -139,8 +181,13 @@ function statusPayload() {
     host: os.hostname(),
     targets: monitor.snapshot(),
     pending: actions.pendingInfo(),
-    updates: steam.snapshot(),
+    // One map, two publishers. A target is managed by at most one of them --
+    // Minecraft has no Steam app id and no Steam game is updated from
+    // minecraft.net -- so the merge cannot collide, and the card renders both
+    // through the same banner.
+    updates: { ...steam.snapshot(), ...mcupdates.snapshot() },
     mods: workshop.snapshot(),
+    plugins: pluginupdates.snapshot(),
   };
 }
 
@@ -153,7 +200,17 @@ app.get('/api/mods/:id', (req, res) => {
   const t = config.targets.find((x) => x.id === req.params.id);
   if (!t) return res.status(404).json({ error: 'unknown target' });
   const profile = t.kind === 'game' ? getProfile(t.game) : null;
-  return res.json(modInventory(t, profile));
+  const inv = modInventory(t, profile);
+  // Which of them has a newer release waiting, from the last plugin check. The
+  // inventory itself is a pure read of the folder and knows nothing about
+  // publishers, so the two are joined here rather than inside src/mods.js.
+  if (inv.ok && inv.kind === 'plugins') {
+    pluginupdates.annotate(t.id, inv.mods);
+    inv.counts.stale = inv.mods.filter((m) => m.status === 'stale' || m.status === 'staged').length;
+    inv.pluginState = pluginupdates.state.get(t.id) ?? null;
+    inv.canUpdate = pluginupdates.managed(t.id);
+  }
+  return res.json(inv);
 });
 
 app.get('/api/history/:id', (req, res) => {
@@ -327,6 +384,91 @@ app.post('/api/rcon/:id', async (req, res) => {
   }
 });
 
+// --- moderation ------------------------------------------------------------
+//
+// Reads come off disk and writes go over RCON, for the reason src/moderation.js
+// explains: the running server owns the ban list, so the file is a report and
+// the console is the only safe way to change it.
+
+function moderationTarget(req, res) {
+  const t = config.targets.find((x) => x.id === req.params.id);
+  if (!t) { res.status(404).json({ ok: false, error: 'unknown target' }); return null; }
+  const profile = t.kind === 'game' ? getProfile(t.game) : null;
+  if (!moderation.managed(t, profile)) {
+    res.status(400).json({ ok: false, error: 'this target has no ban list the dashboard can read' });
+    return null;
+  }
+  return { t, profile };
+}
+
+app.get('/api/bans/:id', (req, res) => {
+  const found = moderationTarget(req, res);
+  if (!found) return;
+  res.json(moderation.readBans(found.t));
+});
+
+// Kicks and pardons leave no trace in any file -- only a line in the log. This
+// is the only place either shows up after the fact.
+app.get('/api/modevents/:id', (req, res) => {
+  const found = moderationTarget(req, res);
+  if (!found) return;
+  res.json(moderation.readEvents(found.t, {
+    limit: Math.min(Number(req.query.limit) || 100, 500),
+    days: Math.min(Number(req.query.days) || 7, 30),
+    dataDir: config.dataDir,
+  }));
+});
+
+app.post('/api/bans/:id', async (req, res) => {
+  const found = moderationTarget(req, res);
+  if (!found) return;
+  const { profile } = found;
+
+  const kind = req.body?.kind === 'ip' ? 'ip' : 'player';
+  const who = String(req.body?.who || '').trim();
+  const reason = moderation.cleanReason(req.body?.reason);
+
+  // Refusing a malformed name here rather than sending it is the difference
+  // between "that is not a username" and RCON's silent, cheerful nothing.
+  const ok = kind === 'ip' ? moderation.validIp(who) : moderation.validName(who);
+  if (!ok) return res.status(400).json({ ok: false, error: `not a valid ${kind === 'ip' ? 'IP address' : 'player name'}` });
+
+  const action = req.body?.action === 'pardon' ? 'pardon' : 'ban';
+  const build = kind === 'ip'
+    ? (action === 'ban' ? profile.moderation.banIp : profile.moderation.pardonIp)
+    : (action === 'ban' ? profile.moderation.ban : profile.moderation.pardon);
+
+  try {
+    const out = await actions.rcon(req.params.id, build(who, reason));
+    // Only once it actually went through: an attempt that RCON refused is not
+    // something that happened, and the feed would be lying if it said so.
+    if (out.ok) {
+      moderation.record(config.dataDir, req.params.id, {
+        kind: action, who, target: kind,
+        reason: reason || null, source: 'dashboard',
+      });
+    }
+    // The ban file is rewritten by the server as part of the command, so the
+    // fresh list can be handed back with the result and the panel never has to
+    // guess whether it worked.
+    res.json({ ...out, bans: moderation.readBans(found.t) });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+// Which of the two update paths a target is on. Minecraft is checked first
+// because a Minecraft server has no Steam app id to match on anyway, so the
+// order only matters if a target is somehow configured for both -- in which
+// case the one that can install unattended is the better answer.
+const updaterFor = (id) => {
+  if (mcupdates.managed(id)) return mcupdates;
+  if (steam.managed(id)) return steam;
+  // Never null: an unmanaged target still needs a reply, and the Steam
+  // updater's own errors already say exactly why it cannot act.
+  return steam;
+};
+
 app.post('/api/action/:id', async (req, res) => {
   const { action, minutes, message, reason } = req.body || {};
   const id = req.params.id;
@@ -341,10 +483,21 @@ app.post('/api/action/:id', async (req, res) => {
       case 'scheduleRestart':return res.json(actions.scheduleRestart(id, Number(minutes) || 15, reason || 'scheduled restart'));
       case 'restartWhenEmpty':return res.json(actions.restartWhenEmpty(id, Number(minutes) || 60, reason || 'restart when empty'));
       case 'cancelRestart':  return res.json(actions.cancelRestart(id));
-      case 'steamCheck':     return res.json(await steam.check(id, { force: true }));
-      case 'steamUpdate':    return res.json(await steam.begin(id));
-      case 'steamCancel':    return res.json(await steam.cancel(id));
+      // Routed by whichever updater manages this target rather than by name,
+      // so the card has one "Check for update" button whatever is behind it.
+      case 'updateCheck':    return res.json(await updaterFor(id).check(id, { force: true }));
+      case 'updateBegin':    return res.json(await updaterFor(id).begin(id));
+      case 'updateCancel':   return res.json(await updaterFor(id).cancel(id));
       case 'modsCheck':      return res.json(workshop.check(id));
+      // Plugin updates are their own pair rather than more cases on the update
+      // button: the server jar and the plugins are different publishers on
+      // different schedules, and the card says which one it is about to touch.
+      case 'pluginsCheck':   return res.json(await pluginupdates.check(id, { force: true }));
+      case 'pluginsUpdate':  return res.json(await pluginupdates.begin(id, { only: req.body?.only ?? null }));
+      // What a refresh would copy, with nothing written and the server left
+      // running. The confirmation dialog is built from this.
+      case 'modsPlan':       return res.json(workshop.plan(id));
+      case 'modsRefresh':    return res.json(await workshop.refresh(id, { force: Boolean(req.body?.force) }));
       default:               return res.status(400).json({ ok: false, error: `unknown action: ${action}` });
     }
   } catch (err) {
@@ -366,6 +519,9 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     monitor.stop();
     scheduler.stop();
     steam.stop();
+    mcupdates.stop();
+    workshop.stop();
+    pluginupdates.stop();
     closeAll();
     for (const res of streamClients) { try { res.end(); } catch { /* already gone */ } }
     server.close(() => process.exit(0));

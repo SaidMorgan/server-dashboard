@@ -49,9 +49,20 @@ const arg = (s) => `'"${winPath(s).replace(/\\+$/, '').replace(/'/g, "''")}"'`;
 // that when installed as a service (LocalSystem) or run elevated, and does not
 // when run as a plain user, where robocopy fails with exit 16. So try backup
 // mode, and fall back to an ordinary copy rather than failing outright.
-async function robocopy(src, dest, mode = '/E', timeout = DEFAULT_STAGE_TIMEOUT_MINUTES * 60_000) {
-  const args = (extra) => [arg(src), arg(dest), `'${mode}'`, ...extra,
-    "'/R:1'", "'/W:1'", "'/NFL'", "'/NDL'", "'/NJH'", "'/NJS'", "'/NP'"].join(', ');
+// `files` names individual files to copy out of src, which is how a single
+// file gets backed up: robocopy's source is always a directory, so a file path
+// passed as src is read as a directory that does not exist and fails with exit
+// 16. Filenames go before the switches — robocopy's argument order is
+// source, destination, [file...], [options].
+//
+// session.lock is excluded everywhere. A running server holds it open for the
+// whole session, it is worthless in an archive, and it was enough on its own to
+// fail a backup of a live world with exit 8.
+async function robocopy(src, dest, mode = '/E', timeout = DEFAULT_STAGE_TIMEOUT_MINUTES * 60_000, files = []) {
+  const args = (extra) => [arg(src), arg(dest), ...files.map((f) => `'"${f}"'`),
+    ...(mode ? [`'${mode}'`] : []), ...extra,
+    "'/XF'", "'session.lock'",
+    "'/R:2'", "'/W:2'", "'/NFL'", "'/NDL'", "'/NJH'", "'/NJS'", "'/NP'"].join(', ');
 
   const run = (extra) => ps(
     `$p = Start-Process robocopy -ArgumentList @(${args(extra)}) -Wait -PassThru -WindowStyle Hidden
@@ -130,7 +141,7 @@ export class Backups {
     const missing = paths.filter((p) => !fs.existsSync(p));
     if (missing.length) {
       console.error(`[backup] ${id}: missing source path ${missing[0]}`);
-      return { ok: false, error: `source folder is missing: ${path.basename(missing[0])}` };
+      return { ok: false, error: `source path is missing: ${path.basename(missing[0])}` };
     }
 
     if (this.running.has(id)) return { ok: false, error: 'a backup is already running for this target' };
@@ -157,8 +168,13 @@ export class Backups {
       // Compress-Archive manages on its own.
       let lockedFileSafe = true;
       for (const src of paths) {
-        const dest = path.join(staging, path.basename(src));
-        const res = await robocopy(src, dest, '/E', this.stageTimeout);
+        // A folder is staged as staging\<name>\...; a single file is staged as
+        // staging\<name>, copied out of its parent by name.
+        const isFile = fs.statSync(src).isFile();
+        const dest = isFile ? staging : path.join(staging, path.basename(src));
+        const res = isFile
+          ? await robocopy(path.dirname(src), dest, '', this.stageTimeout, [path.basename(src)])
+          : await robocopy(src, dest, '/E', this.stageTimeout);
         if (!res.ok) {
           // The alert names the folder; the full path goes to the service log.
           // A 70-character path is unreadable in the feed and useless on a phone.
@@ -237,10 +253,14 @@ export class Backups {
 
       for (const dest of paths) {
         const src = path.join(staging, path.basename(dest));
-        if (!fs.existsSync(src)) throw new Error(`archive has no folder named ${path.basename(dest)}`);
+        if (!fs.existsSync(src)) throw new Error(`archive has no ${path.basename(dest)}`);
         // /MIR makes the destination match the archive exactly, which is what
         // "restore" has to mean — a merge would leave newer stray files behind.
-        const res = await robocopy(src, dest, '/MIR', this.stageTimeout);
+        // Never for a single file: its destination is a directory full of other
+        // things (key.pem sits among Floodgate's config) and /MIR would empty it.
+        const res = fs.statSync(src).isFile()
+          ? await robocopy(path.dirname(src), path.dirname(dest), '', this.stageTimeout, [path.basename(dest)])
+          : await robocopy(src, dest, '/MIR', this.stageTimeout);
         if (!res.ok) throw new Error(`could not restore into ${dest}: ${res.error || 'restore copy failed'}`);
       }
 

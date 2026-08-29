@@ -73,6 +73,13 @@ export default {
 
   verbAliases: { listplayers: 'showplayers', broadcast: 'announce' },
 
+  // The version tile. /v1/api/info already carries it, so the monitor calls
+  // that endpoint once per server run rather than adding anything to the poll.
+  // Palworld reports its own build ("v1.0.3.101283"), which is the number the
+  // patch notes use — deliberately not the Steam buildid the update checker
+  // compares, because that one means nothing to anybody reading a card.
+  parseVersion: (res) => res?.data?.version || null,
+
   // One entry per restVerb above — there is no raw command string here, so the
   // dropdown is the complete list of what this console accepts.
   consoleCommands: [
@@ -83,6 +90,20 @@ export default {
     { command: 'announce <message>', description: 'Message in the chat panel — it fades, so players may miss it' },
     { command: 'shutdown <seconds> <message>', description: 'On-screen countdown, then the server stops — it will not come back on its own', danger: true },
   ],
+
+  // Short, because the console here dispatches to restVerbs above rather than
+  // to the server: a suggestion for anything not in that map would be a
+  // command the dashboard cannot send. The countdown is the one slot with a
+  // sensible set of answers -- everything else is free text.
+  argValues: {
+    seconds: [
+      { value: '10', description: 'Almost immediately' },
+      { value: '30', description: 'Half a minute' },
+      { value: '60', description: 'One minute' },
+      { value: '300', description: 'Five minutes' },
+      { value: '900', description: 'Fifteen minutes' },
+    ],
+  },
 
   setupNotes: [
     'Set RESTAPIEnabled=True and RESTAPIPort=8212 in PalWorldSettings.ini. Auth is',

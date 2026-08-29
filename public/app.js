@@ -106,6 +106,16 @@ function buildCard(target) {
   if (!caps.canRestartWhenEmpty) hide('[data-act=restartWhenEmpty]');
   if (caps.canConsole === false) hide('.console');
   if (!caps.hasMods) hide('.mods');
+  // The panel lists mods for any game with a mods folder; only a workshop
+  // install with somewhere to copy into can refresh one. Two different
+  // questions, so two different flags. The panel's copy of the button is always
+  // there for a target that can refresh; the banner's appears only alongside a
+  // notice about a mod it could act on, and renderMods owns that one.
+  if (caps.canRefreshMods) node.querySelector('.mods .mods-install')?.classList.remove('hidden');
+  // A Paper server whose plugins have publishers the dashboard knows. Separate
+  // from the Steam button above: different half of the install, different
+  // promise -- this one downloads and installs by itself.
+  if (caps.canUpdatePlugins) node.querySelector('.mods .plugins-update')?.classList.remove('hidden');
 
   // Where the console and the broadcast box would have been, say which game
   // this is and why it has neither — a card that is simply missing half of
@@ -117,9 +127,10 @@ function buildCard(target) {
   }
   if (caps.canStart === false) hide('[data-act=start]');
   if (!caps.canUpdate) hide('[data-act=updateRestart]');
-  if (!caps.canSteamUpdate) hide('[data-act=steamUpdate]');
+  if (!caps.canCheckUpdate) hide('[data-act=updateBegin]');
   if (caps.hasBackup === false) hide('.backups');
   if (caps.hasLog === false) hide('.logs');
+  if (!caps.canModerate) hide('.moderation');
   // Hidden only when there is genuinely nothing to show. A game with no control
   // transport still gets the panel if it answers Steam queries — the count is
   // the point of the card for those.
@@ -147,7 +158,7 @@ function buildCard(target) {
   }
 
   const rconInput = node.querySelector('.rcon-input');
-  wireCommandPicker(node, rconInput, caps.consoleCommands || []);
+  wireCommandPicker(node, rconInput, caps.consoleCommands || [], caps.consoleArgs || {}, target.id);
 
   const sendRcon = async () => {
     const command = rconInput.value.trim();
@@ -187,6 +198,7 @@ function buildCard(target) {
   wireSchedules(target, node);
   wireBackups(target, node);
   wireMods(target, node);
+  wireModeration(target, node);
 
   cardsEl.append(node);
   cards.set(target.id, node);
@@ -231,7 +243,7 @@ function selectPlaceholder(input) {
   else input.setSelectionRange(input.value.length, input.value.length);
 }
 
-function wireCommandPicker(node, input, commands) {
+function wireCommandPicker(node, input, commands, argValues, targetId) {
   if (!commands.length) return; // profile ships no list; plain text box as before
 
   const select = node.querySelector('.rcon-pick');
@@ -276,10 +288,331 @@ function wireCommandPicker(node, input, commands) {
     showHelp(picked);
     input.focus();
     selectPlaceholder(input);
+    // The caret has just landed on a <placeholder>; tell the typeahead so it
+    // can offer that slot's values straight away.
+    input.dispatchEvent(new Event('input'));
     select.value = ''; // so picking the same command twice still fires
   });
 
   input.addEventListener('input', () => showHelp(findCommand(commands, input.value)));
+
+  wireTypeahead(node, input, commands, argValues || {}, targetId, showHelp);
+}
+
+// --- next-word suggestions ---------------------------------------------------
+//
+// The dropdown above is one flat menu of whole commands, which stops working
+// the moment a command has more than a couple of shapes: "gamerule" alone has
+// fifty rules behind it and each rule has its own set of legal values. So the
+// console also completes a word at a time -- pick "gamerule", get the rules;
+// pick a rule, get true/false or the numbers that rule takes.
+//
+// It stays a plain text box throughout. Nothing here filters what can be sent;
+// a command the profile has never heard of is typed and run exactly as before,
+// and the suggestions simply have nothing to say about it.
+
+// The players currently online, per target, so <player> can be completed with
+// people who are actually there. Filled by render().
+const onlinePlayers = new Map();
+
+// A slot is either a literal word or a <placeholder>, and a placeholder may
+// arrive wrapped in quotes because the game needs them -- Source's kick takes
+// "<name>" so that a name with a space in it survives the trip. The quotes
+// belong to the slot, so they travel with whatever is suggested for it.
+function slotShape(slot) {
+  const m = slot.match(/^(")?<(.+)>"?$/);
+  return m ? { name: m[2], quote: m[1] || '' } : null;
+}
+
+const isPlaceholder = (slot) => slotShape(slot) !== null;
+
+// One option list, from whichever form the profile wrote it in. The '@' lists
+// are resolved here rather than in the profile because they are a different
+// answer every minute.
+function resolveOptions(spec, targetId) {
+  if (spec === '@players' || spec === '@playerIds') {
+    const players = onlinePlayers.get(targetId) || [];
+    // Two lists because games disagree about what identifies a player: ARK and
+    // 7DTD want the id and would reject the name, Minecraft wants the name and
+    // has no id to offer. The id list is labelled with the name, since an id is
+    // not something anyone recognises on sight.
+    const rows = spec === '@players'
+      ? players.filter((p) => p.name).map((p) => ({ value: p.name, description: 'online now' }))
+      : players.filter((p) => p.id).map((p) => ({ value: p.id, description: p.name || 'online now' }));
+    return rows.length ? rows : null;
+  }
+  return Array.isArray(spec) && spec.length ? spec : null;
+}
+
+// What may go in this slot. `carried` is the previous option's own `values`,
+// which beats the placeholder's name: it is how <value> after a gamerule knows
+// to offer true/false rather than the same list for every rule.
+function slotOptions(slot, carried, argValues, targetId) {
+  const shape = slotShape(slot);
+  if (!shape) return null;
+
+  let opts = null;
+  if (carried) opts = resolveOptions(carried, targetId);
+  // <peaceful|easy|normal|hard> spells its own options out inline.
+  else if (shape.name.includes('|')) opts = shape.name.split('|').map((v) => ({ value: v.trim() })).filter((o) => o.value);
+  else if (argValues[shape.name]) opts = resolveOptions(argValues[shape.name], targetId);
+  // No table for it, but a slot called <player> can only want a player, and one
+  // called <steamID> can only want the same player's id.
+  else if (/^(player|target|name|gamertag)$/i.test(shape.name)) opts = resolveOptions('@players', targetId);
+  else if (/^(steamid|eosid|playerid|userid|entityid)$/i.test(shape.name)) opts = resolveOptions('@playerIds', targetId);
+
+  if (!opts?.length) return null;
+  return shape.quote ? opts.map((o) => ({ ...o, value: `${shape.quote}${o.value}${shape.quote}` })) : opts;
+}
+
+// Candidates for the word at position `words.length`, given the words already
+// typed. Each command is walked slot by slot: literals must match what was
+// typed, placeholders swallow whatever is there and hand their chosen option's
+// `values` on to the next slot.
+function nextWords(commands, argValues, words, targetId) {
+  const found = [];
+  for (const c of commands) {
+    const slots = c.command.trim().split(/\s+/);
+    // One word past the last slot is still worth walking: an option's `values`
+    // can open a slot the command string never spelled out, which is how
+    // "whitelist add" goes on to offer players while "whitelist list" stops.
+    if (slots.length < words.length) continue;
+
+    let carried = null;
+    let matches = true;
+    for (let i = 0; i < words.length; i += 1) {
+      const opts = slotOptions(slots[i], carried, argValues, targetId);
+      if (isPlaceholder(slots[i])) {
+        const picked = opts?.find((o) => o.value.toLowerCase() === words[i].toLowerCase());
+        carried = picked?.values ?? null;
+      } else if (slots[i].toLowerCase() !== words[i].toLowerCase()) {
+        matches = false;
+        break;
+      } else {
+        carried = null;
+      }
+    }
+    if (!matches) continue;
+
+    const slot = slots[words.length];
+    if (slot === undefined) {
+      // Off the end of the command: only a carried list has anything to add.
+      const extra = resolveOptions(carried, targetId);
+      if (extra) for (const o of extra) found.push({ value: o.value, description: o.description || '', danger: false, from: c });
+      continue;
+    }
+
+    const last = words.length === slots.length - 1;
+    const opts = slotOptions(slot, carried, argValues, targetId);
+    if (opts) {
+      for (const o of opts) found.push({ value: o.value, description: o.description || '', danger: false, from: c });
+    } else if (!isPlaceholder(slot)) {
+      // A literal word carries the command's own description only when it is
+      // the whole command -- "say" should not be labelled with what <message>
+      // does, and the danger warning belongs on "stop", not on a prefix of it.
+      found.push({ value: slot, description: last ? c.description : '', danger: last && Boolean(c.danger), from: c });
+    }
+    // A placeholder with no options is free text: nothing useful to suggest.
+  }
+
+  // Same word reached through several commands -- "save" leads to hold, query
+  // and resume. Keep one row, and only claim a description or a danger warning
+  // when every command behind that word agrees on it.
+  const merged = new Map();
+  for (const row of found) {
+    const key = row.value.toLowerCase();
+    const seen = merged.get(key);
+    if (!seen) { merged.set(key, { ...row, sources: 1 }); continue; }
+    seen.sources += 1;
+    if (seen.description !== row.description) seen.description = '';
+    if (!row.danger) seen.danger = false;
+  }
+  return [...merged.values()];
+}
+
+// Is another word expected after these? Separate from having something to
+// suggest: `say <message>` offers no options for the message but still wants
+// one, so accepting "say" should leave the caret a space along rather than
+// hard against the end of the word.
+function expectsMore(commands, words) {
+  return commands.some((c) => {
+    const slots = c.command.trim().split(/\s+/);
+    if (slots.length <= words.length) return false;
+    return slots.every((s, i) => i >= words.length || isPlaceholder(s) || s.toLowerCase() === words[i].toLowerCase());
+  });
+}
+
+// Split typed text into words, keeping a quoted run together. Whitespace alone
+// would be wrong for exactly the games the quotes are there for: "Kid
+// Gamertag" is one word, and splitting it into two walks the command a slot
+// further along than the typist has actually got.
+function splitWords(text) {
+  return text.match(/"[^"]*"?|\S+/g) || [];
+}
+
+// Where the caret is, as a word. A caret sitting inside an unfilled <message>
+// is treated as being on an empty word, so the options replace the whole
+// placeholder rather than being typed into the middle of it.
+function wordAtCaret(value, caret) {
+  let start = caret;
+  while (start > 0 && !/\s/.test(value[start - 1])) start -= 1;
+  let end = caret;
+  while (end < value.length && !/\s/.test(value[end])) end += 1;
+
+  // ...unless the caret is inside a quote that has not been closed yet, in
+  // which case the word began at that quote and runs to its partner: half of
+  // `kick "Kid Ga` is not a word of its own.
+  // An odd number of quotes behind the caret is what "inside a quote" means --
+  // looking only at the nearest one puts the caret back inside a name it has
+  // already finished typing.
+  const head = value.slice(0, caret);
+  if ((head.match(/"/g) || []).length % 2 === 1) {
+    start = head.lastIndexOf('"');
+    const close = value.indexOf('"', caret);
+    end = close === -1 ? value.length : close + 1;
+  }
+
+  const text = value.slice(start, end);
+  return { start, end, prefix: isPlaceholder(text) ? '' : value.slice(start, caret) };
+}
+
+function wireTypeahead(node, input, commands, argValues, targetId, showHelp) {
+  const list = node.querySelector('.cmd-suggest');
+  if (!list) return;
+  const MAX = 12;
+
+  let rows = [];
+  let active = -1;
+  let at = null; // the slice of the input the next pick replaces
+
+  const close = () => {
+    list.classList.add('hidden');
+    list.innerHTML = '';
+    input.setAttribute('aria-expanded', 'false');
+    rows = [];
+    active = -1;
+  };
+
+  const paint = () => {
+    list.innerHTML = '';
+    rows.forEach((row, i) => {
+      const li = document.createElement('li');
+      li.className = `${i === active ? 'active ' : ''}${row.danger ? 'risky' : ''}`.trim();
+      li.setAttribute('role', 'option');
+      li.setAttribute('aria-selected', String(i === active));
+      const word = document.createElement('span');
+      word.className = 'word';
+      // Bold the part already typed so it is obvious why these rows are here.
+      // Counted character by character rather than taken from the prefix
+      // length: a substring hit, or a name found without its opening quote,
+      // has nothing at the front to bold.
+      let hit = 0;
+      while (hit < at.prefix.length && hit < row.value.length
+        && row.value[hit].toLowerCase() === at.prefix[hit].toLowerCase()) hit += 1;
+      const typed = document.createElement('b');
+      typed.textContent = row.value.slice(0, hit);
+      word.append(typed, row.value.slice(hit));
+      if (row.danger) word.prepend('⚠ ');
+      li.append(word);
+      if (row.description) {
+        const note = document.createElement('span');
+        note.className = 'note';
+        note.textContent = row.description;
+        li.append(note);
+      }
+      // mousedown, not click: the input must not lose focus before the pick.
+      li.addEventListener('mousedown', (e) => { e.preventDefault(); accept(i); });
+      list.append(li);
+    });
+    if (rows.length === MAX) {
+      const more = document.createElement('li');
+      more.className = 'more';
+      more.textContent = 'keep typing to narrow this down';
+      list.append(more);
+    }
+    list.classList.remove('hidden');
+    input.setAttribute('aria-expanded', 'true');
+    list.scrollTop = 0;
+  };
+
+  const refresh = () => {
+    // Sending a command clears the box and fires 'input'. Without this the
+    // whole command list would pop open under a console nobody is typing in.
+    if (document.activeElement !== input) { close(); return; }
+    const caret = input.selectionStart ?? input.value.length;
+    at = wordAtCaret(input.value, caret);
+    const words = splitWords(input.value.slice(0, at.start));
+
+    const all = nextWords(commands, argValues, words, targetId);
+    // A leading quote is the slot's, not the typist's: "Ali should still find
+    // "Alice", and so should Ali.
+    const bare = (s) => s.toLowerCase().replace(/^"/, '');
+    const prefix = at.prefix.toLowerCase();
+    const key = bare(at.prefix);
+    // Prefix matches first, then anything containing the fragment: typing
+    // "inventory" should still find keepInventory.
+    const starts = all.filter((r) => bare(r.value).startsWith(key));
+    const contains = key
+      ? all.filter((r) => !bare(r.value).startsWith(key) && bare(r.value).includes(key))
+      : [];
+    rows = [...starts, ...contains].slice(0, MAX);
+
+    // One suggestion that is already typed in full is not a suggestion.
+    if (rows.length === 1 && rows[0].value.toLowerCase() === prefix && prefix) rows = [];
+
+    active = -1;
+    if (!rows.length) close(); else paint();
+  };
+
+  const accept = (i) => {
+    const row = rows[i];
+    if (!row) return;
+    const value = input.value;
+    // A trailing space only when there is another word to come, so a finished
+    // command does not have to be backspaced before Enter.
+    const words = [...splitWords(value.slice(0, at.start)), row.value];
+    const more = expectsMore(commands, words) || nextWords(commands, argValues, words, targetId).length > 0;
+    const tail = value.slice(at.end);
+    // A trailing space is only added when there isn't one already: a command
+    // taken whole from the dropdown has its later <placeholders> still sitting
+    // in the tail, and doubling the gap would split it into an empty word.
+    const gap = more && !/^\s/.test(tail) ? ' ' : '';
+    input.value = `${value.slice(0, at.start)}${row.value}${gap}${tail}`;
+    // Land on the next word rather than at the end of this one, so its own
+    // options come up without having to press anything.
+    const caret = at.start + row.value.length + gap.length
+      + (more && !gap ? tail.match(/^\s*/)[0].length : 0);
+    input.setSelectionRange(caret, caret);
+    showHelp(findCommand(commands, input.value));
+    if (more) refresh(); else close();
+  };
+
+  input.addEventListener('input', refresh);
+  input.addEventListener('focus', refresh);
+  // A click that moves the caret changes which word is being completed.
+  input.addEventListener('click', refresh);
+  input.addEventListener('blur', () => setTimeout(close, 100));
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { close(); return; }
+    if (!rows.length) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      active = e.key === 'ArrowDown'
+        ? (active + 1) % rows.length
+        : (active <= 0 ? rows.length - 1 : active - 1);
+      paint();
+      list.children[active]?.scrollIntoView({ block: 'nearest' });
+      return;
+    }
+    // Tab takes the highlighted row, or the top one if nothing is highlighted:
+    // the usual shell bargain. Enter only accepts something deliberately
+    // chosen, so it still sends the command in the ordinary case.
+    if (e.key === 'Tab' && !e.shiftKey) { e.preventDefault(); accept(active < 0 ? 0 : active); return; }
+    // stopImmediatePropagation because the Run-on-Enter handler is bound to
+    // this same input: without it, picking a row would also send the command.
+    if (e.key === 'Enter' && active >= 0) { e.preventDefault(); e.stopImmediatePropagation(); accept(active); }
+  });
 }
 
 async function runAction(target, node, btn) {
@@ -308,21 +641,30 @@ async function runAction(target, node, btn) {
       + 'is abandoned — it will not restart on top of players.',
     )) return;
   }
-  // The Steam check only stops the server if there is actually something to
-  // install, so the confirmation has to describe a maybe rather than a certainty.
-  if (action === 'steamUpdate') {
+  // The check only stops the server if there is actually something to install,
+  // so the confirmation has to describe a maybe rather than a certainty. What
+  // happens after that differs by publisher and the wording says which: the
+  // dashboard installs a Minecraft update itself, start to finish, while a
+  // Steam one stops the server and hands over to Steam.
+  if (action === 'updateBegin') {
     const count = node.dataset.playerCount || '0';
     const warning = count !== '0' ? `\n\n${count} player(s) are ONLINE right now.` : '';
+    const minecraft = capabilities.get(target.id)?.updateProvider === 'minecraft';
     if (!confirm(
-      `Check Steam for a newer build of ${target.name}?\n\n`
-      + `If there is one, the server will be STOPPED so you can install it in Steam. `
-      + `The dashboard starts it again by itself once Steam has finished.\n\n`
-      + `If it is already up to date, nothing happens.${warning}`,
+      `Check for a newer version of ${target.name}?\n\n`
+      + (minecraft
+        ? 'If there is one, the server will be STOPPED, the release downloaded and '
+          + 'installed over it, and the server started again — nothing else to press. '
+          + 'Your world, server.properties, allowlist.json and permissions.json are kept, '
+          + 'and the download is deleted afterwards.'
+        : 'If there is one, the server will be STOPPED so you can install it in Steam. '
+          + 'The dashboard starts it again by itself once Steam has finished.')
+      + `\n\nIf it is already up to date, nothing happens.${warning}`,
     )) return;
   }
 
-  if (action === 'steamCancel' && !confirm(
-    `Stop waiting for the Steam update and start ${target.name} on the build it already has?`,
+  if (action === 'updateCancel' && !confirm(
+    `Stop waiting for the update and start ${target.name} on the version it already has?`,
   )) return;
 
   if (action === 'stop' || action === 'restart' || action === 'updateRestart') {
@@ -348,7 +690,7 @@ async function runAction(target, node, btn) {
   // A game server is asked to save and exit, and a large world can take a minute
   // or more to do it. A line that says "stop…" and then sits there for ninety
   // seconds is indistinguishable from a button that did nothing, so count.
-  const slow = { stop: 'stopping', restart: 'restarting', updateRestart: 'updating', steamUpdate: 'checking Steam' }[action];
+  const slow = { stop: 'stopping', restart: 'restarting', updateRestart: 'updating', updateBegin: 'checking for updates' }[action];
   let ticker = null;
   if (out && slow) {
     const startedAt = Date.now();
@@ -370,7 +712,7 @@ async function runAction(target, node, btn) {
   }
   try {
     const res = await api(`/api/action/${target.id}`, { method: 'POST', body: JSON.stringify(body) });
-    if (action === 'steamUpdate' || action === 'steamCancel') {
+    if (action === 'updateBegin' || action === 'updateCancel') {
       // From here the banner is the whole story and the status stream keeps it
       // current — except for "already up to date", which leaves no state behind
       // it and would otherwise look like a button that did nothing.
@@ -408,11 +750,18 @@ async function runAction(target, node, btn) {
 }
 
 // ---------------------------------------------------------------------------
-// Steam updates
+// Updates
 // ---------------------------------------------------------------------------
+//
+// One banner, two publishers behind it. A Steam target is stopped and handed
+// over to Steam; a Minecraft target is downloaded and installed here. The state
+// arriving on the stream carries which, and the wording follows it — "build" is
+// a Steam word and "version" is a Minecraft one, and a card that used the wrong
+// one would send you looking in the wrong place.
+const isMinecraft = (u) => u?.provider === 'minecraft';
 
-// The reply to pressing the button. Everything that follows — the wait, the
-// download, the restart — arrives through renderUpdate on the status stream.
+// The reply to pressing the button. Everything that follows — the download, the
+// install, the restart — arrives through renderUpdate on the status stream.
 function showUpdateAnswer(node, res, action) {
   const box = node.querySelector('.update-banner');
   const text = node.querySelector('.update-text');
@@ -420,18 +769,22 @@ function showUpdateAnswer(node, res, action) {
   box.classList.toggle('bad', !res.ok);
 
   if (!res.ok) {
-    text.textContent = `${action === 'steamCancel' ? 'Could not start it' : 'Steam check failed'} — ${res.error}`;
-  } else if (action === 'steamCancel') {
+    text.textContent = `${action === 'updateCancel' ? 'Could not start it' : 'Update check failed'} — ${res.error}`;
+  } else if (action === 'updateCancel') {
     text.textContent = 'No longer waiting — starting the server…';
   } else if (res.updateAvailable === false) {
-    text.textContent = `Already on the current build (${res.installed}). Nothing to do.`;
+    text.textContent = `Already on the current version (${res.installed}). Nothing to do.`;
   } else {
-    text.textContent = 'Update found — stopping the server…';
+    // Deliberately vague about which step comes first: Steam stops the server
+    // straight away, Minecraft downloads first and stops later. The status
+    // stream replaces this line within a second either way.
+    text.textContent = 'Update found — starting the update…';
   }
 }
 
-// One line under the card header saying where this target stands: a new build is
-// out, or the server is stopped waiting for you to install one.
+// One line under the card header saying where this target stands: a new version
+// is out, an update is running, or the server is stopped waiting for you to
+// install one in Steam.
 function renderUpdate(node, u) {
   const box = node.querySelector('.update-banner');
   const text = node.querySelector('.update-text');
@@ -447,15 +800,35 @@ function renderUpdate(node, u) {
   }
 
   box.classList.remove('hidden');
+  // Amber is for "your server is down / it needs you". A Minecraft download
+  // runs with the server up and the players on it, so it is not either.
   box.classList.toggle('waiting', u.phase === 'waiting');
   box.classList.toggle('bad', Boolean(u.error) && u.phase === 'idle');
+  // Only the Steam wait can be cancelled, because it is the only phase that is
+  // waiting for a person rather than doing something. A download that has
+  // started finishes and brings the server back on its own.
   cancel.classList.toggle('hidden', u.phase !== 'waiting');
 
-  const inProgress = { checking: 'Asking Steam which build is current…',
+  const mc = isMinecraft(u);
+  const inProgress = {
+    checking: mc ? 'Asking Minecraft which version is current…' : 'Asking Steam which build is current…',
     stopping: 'Update found — stopping the server…',
-    starting: 'Starting the server…' }[u.phase];
+    installing: mc
+      ? `Installing ${u.latest}${u.edition === 'bedrock' ? ' over the server folder' : ''}…`
+      : 'Installing the update with SteamCMD — this can take a while…',
+    starting: 'Starting the server…',
+  }[u.phase];
 
-  if (u.phase === 'waiting') {
+  if (u.phase === 'downloading') {
+    // The dashboard is doing this download itself, so unlike the Steam wait
+    // below the byte counts are its own and always present.
+    const progress = u.bytesToDownload
+      ? ` — ${fmtBytes(u.bytesDownloaded)} of ${fmtBytes(u.bytesToDownload)}`
+      : ` — ${fmtBytes(u.bytesDownloaded)}`;
+    text.textContent = `⬇ Downloading ${u.latest}${progress}. `
+      + 'The server is still up — it stops once the download is here, and comes '
+      + 'back as soon as the new version is in place.';
+  } else if (u.phase === 'waiting') {
     // Steam counts the bytes down in the manifest, so the card can show progress
     // for a download nobody in this process started.
     const progress = u.bytesToDownload
@@ -467,10 +840,19 @@ function renderUpdate(node, u) {
   } else if (inProgress) {
     text.textContent = inProgress;
   } else if (u.error) {
-    text.textContent = `Steam check failed — ${u.error}`;
+    text.textContent = `Update check failed — ${u.error}`;
   } else if (u.updateAvailable) {
-    text.textContent = `⬆ Steam has build ${u.latest}; this server is running ${u.installed}. `
-      + `Press "Check for update" when you want it installed.`;
+    text.textContent = mc
+      ? `⬆ Minecraft ${u.latest} is out; this server is running ${u.installed}. `
+        + 'Press "Check for update" and the dashboard installs it for you.'
+      : `⬆ Steam has build ${u.latest}; this server is running ${u.installed}. `
+        + 'Press "Check for update" when you want it installed.';
+  } else if (u.unknownInstalled && u.note) {
+    // Not an error and not an update: the publisher answered, but which version
+    // is on disk could not be read, so nothing can be compared. Saying so beats
+    // an empty banner or a confident "up to date" that was never checked.
+    text.textContent = `Minecraft ${u.latest} is the current version, but the installed one `
+      + `could not be read — ${u.note}.`;
   } else {
     box.classList.add('hidden');
   }
@@ -499,9 +881,13 @@ function renderMods(node, m) {
   }
 
   const parts = [];
+  const canRefresh = Boolean(capabilities.get(node.dataset.id)?.canRefreshMods);
   if (m.stale?.length) {
     parts.push(`\u{1F9E9} ${m.stale.length} mod update${m.stale.length > 1 ? 's' : ''} waiting `
-      + `(${m.stale.join(', ')}) — refresh in your mod manager. Mods are not updated automatically.`);
+      + `(${m.stale.join(', ')}) — `
+      + (canRefresh
+        ? 'Refresh mods copies them in and restarts the server. Nothing is updated automatically.'
+        : 'refresh in your mod manager. Mods are not updated automatically.'));
   }
   // Worth saying out loud rather than leaving as a silent "current": these are
   // pinned forever, which is fine until you are waiting on a fix that is never
@@ -514,6 +900,11 @@ function renderMods(node, m) {
     return;
   }
   text.textContent = parts.join(' ');
+
+  // Only next to a notice that names something it could act on. An always-on
+  // button here would be a second copy of the one in the Mods panel.
+  const btn = node.querySelector('.mods-banner .mods-install');
+  if (btn) btn.classList.toggle('hidden', !canRefresh || !m.stale?.length);
 }
 
 // A service card has no player list, which left it noticeably barer than a game
@@ -594,6 +985,17 @@ function statTiles(snap) {
       snap.query === 'ok' ? 'good' : (snap.up && snap.query !== 'starting' ? 'warn' : '')]);
   }
   tiles.push(['Port', String(snap.gamePort ?? '—'), '']);
+  // Only when the server actually told us. A game that publishes its version
+  // nowhere (Valheim, "process") would otherwise carry a tile reading "—"
+  // forever, which looks like something is broken rather than like something
+  // that was never offered. This is also why it sits last: it is the one tile
+  // that can be absent, so the ones above it never move when it appears.
+  // Two columns wide. A version string is the longest value on the card by some
+  // way -- "Paper 26.2-120" and "3.0.25.156508" both overrun a 90px cell, and
+  // the grid's minmax floor means they wrap or spill rather than widening it.
+  // Spanning also happens to consume the empty cell that used to sit at the end
+  // of this row, so the row comes out full instead of half-blank.
+  if (snap.version) tiles.push(['Version', snap.version, '', 'wide']);
   return tiles;
 }
 
@@ -603,6 +1005,8 @@ function render(snap, pending, updates, mods) {
 
   const players = snap.players;
   const count = snap.playerCount ?? (players ? players.length : null);
+  // So the console can complete <player> with people who are actually on.
+  onlinePlayers.set(snap.id, players || []);
   node.dataset.playerCount = count ?? 0;
 
   // Status dot: green = up, amber = up but RCON/health unhappy, red = down.
@@ -626,7 +1030,7 @@ function render(snap, pending, updates, mods) {
   }
 
   node.querySelector('.stats').innerHTML = statTiles(snap)
-    .map(([k, v, cls]) => `<div class="stat"><div class="k">${k}</div><div class="v ${cls}">${escapeHtml(String(v))}</div></div>`)
+    .map(([k, v, cls, tile]) => `<div class="stat ${tile || ''}"><div class="k">${k}</div><div class="v ${cls}">${escapeHtml(String(v))}</div></div>`)
     .join('');
 
   const list = node.querySelector('.playerlist');
@@ -806,6 +1210,131 @@ async function loadSchedules(id, node) {
 }
 
 // ---------------------------------------------------------------------------
+// Moderation
+//
+// Two questions the log tail could technically answer and nobody could
+// realistically read it for: who is banned right now, and what has been handed
+// out recently. The second half matters more than it looks -- a kick leaves no
+// record anywhere except one line in a log that rotates, so without this panel
+// "why did that player drop" is unanswerable an hour later.
+//
+// Pardon is one click because it is the safe direction: it lets somebody back
+// in, and a mistake is undone by banning them again. Ban asks first.
+// ---------------------------------------------------------------------------
+
+const MOD_KIND = {
+  ban:     { label: 'banned',  cls: 'bad' },
+  kick:    { label: 'kicked',  cls: 'warn' },
+  pardon:  { label: 'pardoned', cls: 'good' },
+  blocked: { label: 'blocked at the door', cls: 'dim' },
+};
+
+function wireModeration(target, node) {
+  const details = node.querySelector('details.moderation');
+  if (!details || details.classList.contains('hidden')) return;
+
+  details.addEventListener('toggle', function () {
+    if (this.open) loadModeration(target.id, node);
+  });
+
+  const nameInput = node.querySelector('.ban-name');
+  const reasonInput = node.querySelector('.ban-reason');
+
+  const doBan = async () => {
+    const who = nameInput.value.trim();
+    if (!who) return;
+    const reason = reasonInput.value.trim();
+    if (!confirm(`Ban ${who}?${reason ? `\n\nReason: ${reason}` : ''}\n\nThey are disconnected and cannot rejoin until you pardon them.`)) return;
+    await modAction(target.id, node, { who, reason, action: 'ban' }, `banning ${who}…`);
+    nameInput.value = '';
+    reasonInput.value = '';
+  };
+
+  node.querySelector('.ban-do').addEventListener('click', doBan);
+  nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doBan(); });
+  reasonInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doBan(); });
+}
+
+// Every write goes through here so there is one place that knows a ban is sent
+// over RCON and therefore needs the server to be up -- and one place that says
+// so plainly when it isn't.
+async function modAction(id, node, body, busyText) {
+  const status = node.querySelector('.mod-status');
+  status.textContent = busyText;
+  const res = await api(`/api/bans/${id}`, { method: 'POST', body: JSON.stringify(body) });
+  if (res.ok) {
+    status.textContent = 'done';
+    // The reply carries the ban list the server wrote as part of the command,
+    // so the list below is right without a second round trip.
+    if (res.bans) renderBans(id, node, res.bans);
+    loadModEvents(id, node);
+  } else {
+    status.textContent = `failed: ${res.error}`;
+  }
+}
+
+async function loadModeration(id, node) {
+  renderBans(id, node, await api(`/api/bans/${id}`));
+  loadModEvents(id, node);
+}
+
+function renderBans(id, node, data) {
+  const list = node.querySelector('.banlist');
+  const count = node.querySelector('.ban-count');
+  const rows = [
+    ...(data.players || []).map((b) => ({ ...b, kind: 'player', who: b.name })),
+    ...(data.ips || []).map((b) => ({ ...b, kind: 'ip', who: b.ip })),
+  ];
+
+  count.textContent = rows.length ? `· ${rows.length}` : '';
+
+  if (!data.ok) {
+    list.innerHTML = `<li class="empty">${escapeHtml(data.error || 'cannot read the ban list')}</li>`;
+    return;
+  }
+  if (!rows.length) {
+    list.innerHTML = '<li class="empty">nobody is banned</li>';
+    return;
+  }
+
+  list.innerHTML = rows.map((b) => `<li>
+    <span class="ban-who">${escapeHtml(b.who || '?')}${b.kind === 'ip' ? ' <span class="dim">(IP)</span>' : ''}</span>
+    <span class="ban-why">${escapeHtml(b.reason || 'no reason given')}</span>
+    <span class="ban-meta">${escapeHtml(b.source || 'unknown')}${b.created ? ` · ${fmtWhen(b.created)}` : ''}</span>
+    <button class="mini good" data-pardon="${escapeHtml(b.who || '')}" data-kind="${b.kind}">pardon</button>
+  </li>`).join('');
+
+  list.querySelectorAll('[data-pardon]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      btn.classList.add('busy');
+      modAction(id, node, { who: btn.dataset.pardon, kind: btn.dataset.kind, action: 'pardon' },
+        `pardoning ${btn.dataset.pardon}…`);
+    });
+  });
+}
+
+async function loadModEvents(id, node) {
+  const list = node.querySelector('.modevents');
+  const res = await api(`/api/modevents/${id}`);
+  const events = res.events || [];
+
+  if (!events.length) {
+    list.innerHTML = '<li class="empty">nothing in the last 7 days</li>';
+    return;
+  }
+
+  list.innerHTML = events.map((e) => {
+    const k = MOD_KIND[e.kind] || { label: e.kind, cls: 'dim' };
+    return `<li>
+      <span class="ev-kind ${k.cls}">${escapeHtml(k.label)}</span>
+      <span class="ev-who">${escapeHtml(e.who || '?')}</span>
+      <span class="ev-why">${escapeHtml(e.reason || '')}${e.repeats ? ` <span class="dim">×${e.repeats}</span>` : ''}</span>
+      <span class="ev-meta">${escapeHtml(e.source || '')} · ${escapeHtml(fmtWhen(e.at))}</span>
+    </li>`;
+  }).join('');
+}
+
+// ---------------------------------------------------------------------------
 // Backups
 // ---------------------------------------------------------------------------
 
@@ -872,9 +1401,13 @@ async function loadBackups(id, node) {
 // modded server it says nothing at all and you still had to go and look in the
 // folder to find out what the server is running. This is the list.
 //
-// Nothing here writes. Enabling, updating and removing mods stay in the mod
-// manager for the reason src/workshop.js gives: a mod has no `validate` to undo
-// a bad one, and the server can be fine until the first player joins.
+// One thing here writes: "Refresh from Steam" replaces the files a mod already
+// installed with the newer copies the Steam client has downloaded, then restarts
+// the server. Enabling, removing and installing mods stay in the mod manager for
+// the reason src/workshop.js gives -- a mod has no `validate` to undo a bad one,
+// and the server can be fine until the first player joins. What the button adds
+// is the one step that is pure mechanics: the same files, from the same item,
+// into the same places.
 // ---------------------------------------------------------------------------
 
 function wireMods(target, node) {
@@ -897,13 +1430,187 @@ function wireMods(target, node) {
       await api(`/api/action/${target.id}`, { method: 'POST', body: JSON.stringify({ action: 'modsCheck' }) })
         .catch(() => {});
     }
+    // Same idea on a Paper server, and it is the slow half: four publisher APIs
+    // rather than a folder read. Failures are swallowed because the panel below
+    // is still worth drawing without them -- each row says so itself.
+    if (capabilities.get(target.id)?.canUpdatePlugins) {
+      await api(`/api/action/${target.id}`, { method: 'POST', body: JSON.stringify({ action: 'pluginsCheck' }) })
+        .catch(() => {});
+    }
     await loadMods(target.id, node);
     btn.classList.remove('busy');
+  });
+
+  // Both copies of the button -- the one in this panel and the one on the
+  // banner, which is where you are actually looking when there is something to
+  // do -- run the same thing.
+  node.querySelectorAll('.mods-install').forEach((btn) => {
+    btn.addEventListener('click', () => refreshModsFromSteam(target, node, btn));
+  });
+
+  node.querySelector('.plugins-update')?.addEventListener('click', (event) => {
+    updatePlugins(target, node, event.currentTarget);
   });
 
   // The count is the useful part at a glance, so it is fetched once on load
   // rather than waiting for somebody to open the panel.
   loadMods(target.id, node, { quiet: true });
+}
+
+// What the confirmation says, from the plan the server just made. It is worth
+// spelling out rather than asking "are you sure": the interesting part of a mod
+// refresh is what it is NOT going to touch -- a file you have edited since it
+// was installed, or one the Steam copy has no equivalent for.
+function describePlan(plan) {
+  const lines = [];
+  for (const m of plan.mods) {
+    if (!m.ok) { lines.push(`  ${m.name}: cannot refresh — ${m.error}`); continue; }
+    const bits = [`${m.copy.length} file(s) to copy`];
+    if (m.same.length) bits.push(`${m.same.length} already identical`);
+    if (m.guarded.length) bits.push(`${m.guarded.length} left alone (edited here)`);
+    if (m.unmapped.length) bits.push(`${m.unmapped.length} not in the Steam copy`);
+    lines.push(`  ${m.name}: ${bits.join(', ')}`);
+    for (const g of m.guarded) lines.push(`     keeping your ${g.dest}`);
+  }
+  return lines.join('\n');
+}
+
+// Plugin updates, which unlike the Steam refresh next door the dashboard does
+// end to end: it fetches from each plugin's publisher, verifies every jar
+// against a published checksum, and restarts the server once for all of them.
+// The confirmation says what will be installed and what it costs, because the
+// cost is an outage for anyone online.
+async function updatePlugins(target, node, btn) {
+  const status = node.querySelector('.mods-status');
+  const say = (text, bad = false) => {
+    if (!status) return;
+    status.textContent = text;
+    status.className = `mods-status${bad ? ' bad' : ''}`;
+  };
+
+  btn.classList.add('busy');
+  try {
+    say('checking each plugin with its publisher…');
+    const check = await api(`/api/action/${target.id}`, {
+      method: 'POST', body: JSON.stringify({ action: 'pluginsCheck' }),
+    });
+    if (!check.ok) { say(`could not check for plugin updates — ${check.error}`, true); return; }
+
+    const waiting = (check.plugins || []).filter((p) => p.status === 'outdated');
+    await loadMods(target.id, node, { quiet: true });
+
+    if (!waiting.length) {
+      const broken = (check.plugins || []).filter((p) => p.status === 'error').length;
+      say(`every plugin is current${broken ? ` — ${broken} could not be checked, see the list` : ''}`);
+      return;
+    }
+
+    const count = node.dataset.playerCount || '0';
+    const ok = confirm(
+      `Update ${waiting.length} plugin(s) on ${target.name}?\n\n`
+      + `${waiting.map((p) => `  ${p.name}: ${p.version ?? '?'} → ${p.latestVersion}  (from ${p.source})`).join('\n')}\n\n`
+      + 'Each jar is downloaded and checked against its publisher’s checksum first, with the server '
+      + 'still running. Then the server STOPS once, all of them are installed, and it starts again. '
+      + 'The jars they replace are kept, so there is a way back.\n\n'
+      + (count !== '0'
+        ? `${count} player(s) appear to be online — they will be disconnected.`
+        : 'Nobody is online.'),
+    );
+    if (!ok) { say('not updated'); return; }
+
+    say('updating — the server restarts once at the end…');
+    const res = await api(`/api/action/${target.id}`, {
+      method: 'POST', body: JSON.stringify({ action: 'pluginsUpdate' }),
+    });
+
+    const done = res.updated?.length || 0;
+    const failed = res.failed?.length || 0;
+    if (!res.ok && !done) {
+      say(`no plugin was updated — ${res.error || res.failed?.map((f) => f.error).join('; ')}`, true);
+    } else {
+      say(`updated ${done} plugin(s)${failed ? `, ${failed} failed` : ''}`
+        + `${res.started === false ? ' — SERVER DID NOT START' : ' — server restarted'}`,
+        failed > 0 || res.started === false);
+    }
+    await loadMods(target.id, node);
+  } catch (err) {
+    say(`plugin update failed — ${err.message}`, true);
+  } finally {
+    btn.classList.remove('busy');
+  }
+}
+
+async function refreshModsFromSteam(target, node, btn) {
+  const status = node.querySelector('.mods-status');
+  const say = (text, bad = false) => {
+    if (!status) return;
+    status.textContent = text;
+    status.className = `mods-status${bad ? ' bad' : ''}`;
+  };
+
+  btn.classList.add('busy');
+  try {
+    const plan = await api(`/api/action/${target.id}`, {
+      method: 'POST', body: JSON.stringify({ action: 'modsPlan' }),
+    });
+    if (!plan.ok) { say(`could not plan the refresh — ${plan.error}`, true); return; }
+    if (plan.nothingToDo) {
+      say('nothing waiting — every installed mod already matches its Steam copy');
+      await loadMods(target.id, node);
+      return;
+    }
+
+    // A refresh with nothing to copy is a timestamp fix, and it does not stop
+    // the server. Promising an outage that will not happen is as misleading as
+    // hiding one that will.
+    const willStop = plan.files > 0;
+    const count = node.dataset.playerCount || '0';
+    const ok = confirm(
+      `Refresh mods on ${target.name} from the Steam copy?\n\n`
+      + `${describePlan(plan)}\n\n`
+      + (willStop
+        ? `The server will STOP, ${plan.files} file(s) (${fmtBytes(plan.bytes)}) will be copied in, and it will `
+          + `start again. Replaced files are kept in the dashboard's data folder.\n\n`
+          + (count !== '0' ? `${count} player(s) appear to be online — the refresh will refuse to run unless you confirm again.` : 'Nobody is online.')
+        : 'Nothing needs copying — the installed files already match Steam byte for byte, so the server keeps '
+          + 'running and only the "update waiting" flag is cleared.'),
+    );
+    if (!ok) return;
+
+    let res = await api(`/api/action/${target.id}`, {
+      method: 'POST', body: JSON.stringify({ action: 'modsRefresh' }),
+    });
+
+    // The server refused because it could not confirm an empty server. That is
+    // the right default and the wrong answer often enough to be worth one more
+    // question -- but the question has to say what it costs.
+    if (res.waiting) {
+      const again = confirm(
+        `${res.error}.\n\n`
+        + `Stop ${target.name} anyway and refresh now? Anyone still connected will be disconnected `
+        + `when it saves and exits.`,
+      );
+      if (!again) { say(`not refreshed — ${res.error}`); return; }
+      say('refreshing…');
+      res = await api(`/api/action/${target.id}`, {
+        method: 'POST', body: JSON.stringify({ action: 'modsRefresh', force: true }),
+      });
+    }
+
+    if (!res.ok) {
+      say(`refresh failed — ${res.error || res.failed?.join('; ')}`, true);
+    } else if (res.verifiedOnly) {
+      say(`already current — ${res.mods.length} mod(s) verified against Steam, server left running`);
+    } else {
+      say(`refreshed ${res.files} file(s)${res.restarted ? ' — server restarted' : ' — SERVER DID NOT START'}`,
+        !res.restarted);
+    }
+    await loadMods(target.id, node);
+  } catch (err) {
+    say(`refresh failed — ${err.message}`, true);
+  } finally {
+    btn.classList.remove('busy');
+  }
 }
 
 // One line per mod. The two things worth seeing without opening anything are
@@ -914,20 +1621,53 @@ function modLine(m) {
   const bits = [];
   if (m.version) bits.push(`v${m.version}`);
   if (m.author) bits.push(`by ${m.author}`);
+  // Minecraft only. The plugin's declared API floor, not the version it was
+  // built against -- see src/pluginjar.js -- so it is labelled as a floor.
+  if (m.apiVersion) bits.push(`API ≥ ${m.apiVersion}`);
   if (m.bytes != null) bits.push(fmtBytes(m.bytes));
   if (m.installedAt) bits.push(`installed ${fmtWhen(m.installedAt)}`);
+  // The filename, when it is not simply the name again. A plugin is identified
+  // by what is inside the jar but deleted by what the jar is called, and those
+  // two disagree often enough (floodgate-spigot.jar is "floodgate") that the
+  // panel has to answer both.
+  if (m.file && m.file.replace(/\.jar$/i, '').toLowerCase() !== (m.name || '').toLowerCase()) {
+    bits.push(m.file);
+  }
+  // Who the dashboard would fetch an update from. Worth showing on every row,
+  // not just the outdated ones: it is the answer to "will this look after
+  // itself?", which is otherwise invisible until something is waiting.
+  if (m.source) bits.push(`updates from ${m.source}`);
 
   const flags = [];
   if (m.status === 'stale') {
-    flags.push(['stale', 'update waiting', `Steam has a newer copy than the one installed${m.sourceAt ? ` (published ${fmtWhen(m.sourceAt)})` : ''}. Refresh it in your mod manager.`]);
+    flags.push(['stale', 'update waiting', m.staleWhy || `Steam has a newer copy than the one installed${m.sourceAt ? ` (published ${fmtWhen(m.sourceAt)})` : ''}. Refresh it in your mod manager.`]);
+  }
+  if (m.status === 'staged') {
+    flags.push(['stale', 'update staged', m.staleWhy || 'A newer copy is waiting to be installed on the next restart.']);
   }
   if (m.status === 'unsubscribed') {
     flags.push(['orphan', 'not subscribed', 'Installed here but not subscribed in the Steam client, so it will never receive an update.']);
   }
+  // Two jars claiming the same name: the server loads one of them and refuses
+  // the other, so this is a decision waiting to be made, not a warning.
+  if (m.conflict) {
+    flags.push(['dupe', 'duplicate', 'Another file in this folder declares the same plugin name — usually a new version dropped in without deleting the old one. The server loads only one of them.']);
+  }
   // Only an explicit false. A game with no mod list to read reports null, and
   // "we cannot tell" must not be shown as "the server is ignoring this".
   if (m.enabled === false) {
-    flags.push(['off', 'not loaded', 'Installed, but missing from the game’s active mod list — the server is not loading it.']);
+    flags.push(['off', 'not loaded', m.disabledWhy || 'Installed, but missing from the game’s active mod list — the server is not loading it.']);
+  }
+
+  // Neither a problem nor a promise: the dashboard is not in a position to
+  // update this one, and saying nothing would read as "up to date".
+  // null means "checked, and there is no publisher for this one". undefined
+  // means the panel has not been checked yet, which is not the same thing and
+  // must not be flagged as if it were.
+  if (m.sourceError) {
+    flags.push(['note', 'source unreachable', m.sourceError]);
+  } else if (m.source === null) {
+    flags.push(['note', 'no source', 'No publisher is configured for this plugin, so the dashboard will never update it. Add one under pluginUpdates.sources in config.json.']);
   }
 
   const deps = m.dependencies?.length
@@ -949,6 +1689,7 @@ async function loadMods(id, node, { quiet = false } = {}) {
   const count = node.querySelector('.mods-count');
   const where = node.querySelector('.mods-where');
   const status = node.querySelector('.mods-status');
+  const label = node.querySelector('.mods-label');
   if (!list) return;
 
   let res;
@@ -958,10 +1699,17 @@ async function loadMods(id, node, { quiet = false } = {}) {
     return;
   }
 
+  // What this server calls them. A Paper server has plugins and no mods folder,
+  // and a panel headed "Mods" would send you looking for a folder that is not
+  // there. The server decides the word; this only spells it.
+  const noun = res.noun || 'mod';
+  const plural = `${noun}s`;
+  if (label) label.textContent = plural.charAt(0).toUpperCase() + plural.slice(1);
+
   if (!res.ok) {
     count.textContent = '(unreadable)';
     count.className = 'mods-count bad';
-    list.innerHTML = `<li class="empty">could not read the mods folder — ${escapeHtml(res.error || 'unknown error')}</li>`;
+    list.innerHTML = `<li class="empty">could not read the ${escapeHtml(noun)} folder — ${escapeHtml(res.error || 'unknown error')}</li>`;
     where.textContent = res.dir || '';
     return;
   }
@@ -970,6 +1718,7 @@ async function loadMods(id, node, { quiet = false } = {}) {
   const notes = [];
   if (c.stale) notes.push(`${c.stale} update${c.stale > 1 ? 's' : ''} waiting`);
   if (c.disabled) notes.push(`${c.disabled} not loaded`);
+  if (c.conflicts) notes.push(`${c.conflicts} duplicate${c.conflicts > 1 ? 's' : ''}`);
   if (c.unsubscribed) notes.push(`${c.unsubscribed} unsubscribed`);
   count.textContent = c.total
     ? `· ${c.total}${notes.length ? ` · ${notes.join(', ')}` : ''}`
@@ -988,8 +1737,8 @@ async function loadMods(id, node, { quiet = false } = {}) {
 
   if (!res.mods.length) {
     list.innerHTML = res.missing
-      ? '<li class="empty">no mods installed — nothing in the mods folder yet</li>'
-      : '<li class="empty">no mods installed</li>';
+      ? `<li class="empty">no ${escapeHtml(plural)} installed — the folder is not there yet</li>`
+      : `<li class="empty">no ${escapeHtml(plural)} installed</li>`;
   } else {
     list.innerHTML = res.mods.map(modLine).join('');
   }

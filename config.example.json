@@ -109,6 +109,27 @@
     // "library": "D:\\SteamLibrary\\steamapps"  // extra folder to look in
   },
 
+  // Minecraft version checks, for "bedrock" and "minecraft" targets. Unlike the
+  // Steam block above, this one installs what it finds: nothing else owns a
+  // Minecraft install, so the dashboard stops the server, downloads the
+  // release, puts it in place, deletes the download and starts the server
+  // again, with nothing to press in between. See README.md.
+  "minecraft": {
+    // How often to check in the background. A new alert is raised once per new
+    // version, not once per check.
+    "checkMinutes": 360,
+
+    // Ceilings, not expected durations. The Bedrock zip is around 95 MB and
+    // unpacks to roughly ten thousand files.
+    "downloadTimeoutMinutes": 30,
+    "extractTimeoutMinutes": 15,
+
+    // The download is deleted once it is installed. Turn this on to keep it:
+    // Mojang publishes no archive of past Bedrock releases, so a kept zip is
+    // the only offline way back to the version you were on.
+    "keepDownloads": false
+  },
+
   "targets": [
     {
       "id": "ark-island",
@@ -234,7 +255,124 @@
       "maxPlayers": 20,
       "processName": "java",
       "startCommand": "C:\\Servers\\Minecraft\\start.bat",
-      "logFile": "C:\\Servers\\Minecraft\\logs\\latest.log"
+      "logFile": "C:\\Servers\\Minecraft\\logs\\latest.log",
+
+      // Optional -- the whole block. A Java target already says where it starts
+      // from, and both the install folder and the version on disk are worked
+      // out from that, so "Check for update" works with none of this set. What
+      // is here is for installs laid out unusually, and for the real choices:
+      //
+      //   flavor  "vanilla" takes Mojang's server jar, "paper" takes PaperMC
+      //           builds. The Minecraft version is read from the jar itself.
+      //   track   which new versions count. "same" holds the Minecraft version
+      //           you are on and takes newer builds of it; "latest" follows
+      //           Minecraft releases; or name a version to pin to. Defaults to
+      //           "same" for Paper and "latest" for vanilla, because every
+      //           plugin on a Paper server is built against one Minecraft
+      //           version, and carrying them across a version bump unattended
+      //           is how a server comes back up with half of them refusing to
+      //           load.
+      //   auto    install it as soon as one appears AND the server is empty.
+      //           Off by default: a version bump can break plugins, and a
+      //           notice plus a button is the safer trade for most people.
+      //
+      // "jar" names the file to replace if it is not server.jar, and
+      // "installDir" the folder if it is not the one start.bat sits in. The
+      // jar being replaced is kept, so there is always a way back.
+      "minecraftUpdate": {
+        "flavor": "vanilla",
+        "track": "latest",
+        "auto": false
+        // "jar": "paper.jar",
+        // "installDir": "C:\\Servers\\Minecraft"
+      },
+
+      // The other half of a Paper install: the jars in plugins/. Off unless
+      // this block is present, and it does nothing on a vanilla server, which
+      // has no plugins folder.
+      //
+      // Each plugin is matched to its publisher by the name in its own
+      // plugin.yml. Common ones (Geyser, Floodgate, GriefPrevention, Prism,
+      // VeinMiner, NBTAPI...) are in the catalogue in src/pluginupdate.js and
+      // need nothing here. Sources are NEVER guessed by searching for a name --
+      // Modrinth has a "veinminer" that is not the VeinMiner most servers run,
+      // and installing that over yours would be worse than never updating.
+      //
+      // Every jar is verified against the publisher's own checksum before
+      // anything is stopped, and one restart installs all of them. The jar each
+      // one replaces is kept under the dashboard's data folder.
+      //
+      //   auto                 install when an update appears AND the server is
+      //                        empty. Off by default, like the jar updater.
+      //   requireGameVersion   refuse a release that does not list the running
+      //                        Minecraft version. Off by default: plugins are
+      //                        often slow to add a new version to their list,
+      //                        so this refuses far more than it protects. It is
+      //                        reported on the plugin either way.
+      //   sources              add or override an entry. "Name": false never
+      //                        updates that plugin.
+      "pluginUpdates": {
+        "auto": false
+        // "requireGameVersion": true,
+        // "sources": {
+        //   "MyPlugin":    { "provider": "modrinth", "project": "my-plugin" },
+        //   "OtherPlugin": { "provider": "hangar", "project": "OtherPlugin" },
+        //   "ThirdPlugin": { "provider": "github", "repo": "owner/repo",
+        //                    "asset": "^ThirdPlugin-[0-9.]+[.]jar$" },
+        //   "Geyser-Spigot": false
+        // }
+      }
+    },
+
+    {
+      "id": "bedrock",
+      "name": "Minecraft (Bedrock)",
+      "kind": "game",
+      "game": "bedrock",
+      "host": "127.0.0.1",
+
+      // Both 19132, and not a typo: Bedrock answers the ping on the same port
+      // players connect to. It is UDP -- a firewall rule copied from a Java
+      // server will not pass it.
+      "gamePort": 19132,
+      "queryPort": 19132,
+      "maxPlayers": 10,
+
+      // The Source RCON listener tools/bds-supervisor.js puts in front of the
+      // BDS console -- BDS has no RCON of its own. Loopback only, and it must
+      // stay that way: the password crosses this socket in plaintext.
+      "rconPort": 25585,
+      "rconPassword": "${BEDROCK_RCON_PASSWORD}",
+      "processName": "bedrock_server",
+      "startCommand": "C:\\GameServers\\Bedrock\\Minecraft Start.bat",
+      "logFile": "C:\\GameServers\\Bedrock\\logs\\latest.log",
+
+      // Optional, like the Java one above and for the same reason: the folder
+      // and the installed version are both worked out from what is already
+      // here. Pressing "Check for update" downloads the current Bedrock zip,
+      // unpacks it over this folder, deletes the zip and starts the server.
+      //
+      // Four names are never overwritten -- server.properties, allowlist.json,
+      // whitelist.json and permissions.json, all of which the zip ships stock
+      // copies of -- and neither are worlds\\ or the development_* folders.
+      // Nothing is ever deleted either, so your own packs and scripts survive.
+      // "keep" adds to that list; end an entry with "/" for a whole folder.
+      //
+      // "auto" is a safer proposition here than on a modded Java server:
+      // Bedrock has no plugins to break, so an empty server updating itself
+      // overnight is mostly upside.
+      "minecraftUpdate": {
+        "auto": true,
+        "keep": ["my-scripts/"]
+        // "preview": true   // follow the preview channel instead
+      },
+
+      "backup": {
+        "enabled": true,
+        "paths": ["C:\\GameServers\\Bedrock\\worlds"],
+        "keep": 20,
+        "beforeRestart": true
+      }
     },
 
     {

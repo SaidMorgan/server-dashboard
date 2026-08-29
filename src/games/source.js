@@ -31,9 +31,27 @@ export default {
     { command: 'version', description: 'Server build number' },
     { command: 'say <message>', description: 'Server message in everyone\'s chat' },
     { command: 'kick "<name>"', description: 'Disconnect one player; they can rejoin' },
+    { command: 'sv_cheats <onOff>', description: 'Allow cheat commands' },
+    { command: 'sv_alltalk <onOff>', description: 'Let both teams hear each other on voice' },
+    { command: 'sv_pausable <onOff>', description: 'Allow the game to be paused' },
     { command: 'changelevel <map>', description: 'Switch maps — everyone reloads into the new one', danger: true },
     { command: 'quit', description: 'Shut the server down — it will not come back on its own', danger: true },
   ],
+
+  // Deliberately thin. This profile is the *generic* Source one, so anything
+  // suggested here has to hold for every game built on the engine: the three
+  // cvars above are engine-level, while the mp_* ones people usually want are
+  // per-game and would be suggestions that print "Unknown command" half the
+  // time. The map list is the same problem and is worse -- it is per-install.
+  //
+  // kick needs no entry: "<name>" is a quoted player slot, and the console
+  // fills those from the player list, quotes included.
+  argValues: {
+    onOff: [
+      { value: '1', description: 'On' },
+      { value: '0', description: 'Off' },
+    ],
+  },
 
   // status output, one player per line:
   // # 2 "PlayerName" STEAM_1:0:1234 05:12 45 0 active 196608

@@ -199,6 +199,26 @@ const DEFAULTS = {
     // steamLibrary wins over this.
     library: null,
   },
+  // Minecraft version checks, for Bedrock and Java targets. Unlike the Steam
+  // block above, this one can install what it finds: nothing else owns a
+  // Minecraft install, so there is no second program to coordinate with. See
+  // src/mcupdate.js.
+  minecraft: {
+    // How often to compare the installed version against the published one.
+    // Six hours, matching the Steam sweep: a Minecraft release lands every few
+    // weeks and the answer only matters when you are about to act on it.
+    checkMinutes: 360,
+    // Ceilings, not expected durations. The Bedrock zip is ~95 MB and extracts
+    // to eleven thousand files, and an update killed halfway is worse than one
+    // that took a while.
+    downloadTimeoutMinutes: 30,
+    extractTimeoutMinutes: 15,
+    // The download is deleted once installed, which is what keeps this
+    // unattended rather than a folder that fills with 95 MB zips. Turn it on to
+    // keep them: Mojang publishes no archive of past Bedrock releases, so a
+    // kept zip is the only offline way back to the previous build.
+    keepDownloads: false,
+  },
   // Steam Workshop mod checks, for game targets that carry a workshopMods
   // block. Detection only -- see src/workshop.js for why nothing is installed
   // automatically.
@@ -206,6 +226,13 @@ const DEFAULTS = {
     // Mods publish far less often than game builds, and the dashboard never
     // acts on the answer by itself, so there is nothing to gain from asking
     // more often than this.
+    checkMinutes: 360,
+  },
+  // Minecraft plugin update checks, for targets carrying a pluginUpdates block.
+  // See src/pluginupdate.js.
+  plugins: {
+    // One sweep asks four publisher APIs per server, and plugins release on the
+    // order of weeks. Six hours is generous either way.
     checkMinutes: 360,
   },
   restart: {
@@ -441,6 +468,160 @@ function validateTarget(t, i, seen, errors) {
     }
   }
 
+  // Minecraft update checks. Every field is optional: a bedrock or minecraft
+  // target already says where it starts from and what it logs to, which is
+  // enough to find the install and read the version out of it. This block is
+  // for the installs that are laid out unusually, and for opting in to
+  // unattended updates.
+  if (t.minecraftUpdate !== undefined && t.minecraftUpdate !== null) {
+    const mu = t.minecraftUpdate;
+    if (typeof mu !== 'object' || Array.isArray(mu)) {
+      errors.push(
+        `${at}.minecraftUpdate: expected an object, e.g. `
+        + `{ "auto": true } or { "installDir": "C:\\\\GameServers\\\\Bedrock" }`,
+      );
+    } else {
+      if (mu.edition !== undefined && !['bedrock', 'java'].includes(mu.edition)) {
+        errors.push(
+          `${at}.minecraftUpdate.edition: expected "bedrock" or "java"; got `
+          + `${JSON.stringify(mu.edition)}. Omit it and it follows the game: `
+          + `"bedrock" for the bedrock profile, "java" for minecraft.`,
+        );
+      }
+      const edition = mu.edition ?? (t.game === 'bedrock' ? 'bedrock' : t.game === 'minecraft' ? 'java' : null);
+      if (!edition) {
+        errors.push(
+          `${at}.minecraftUpdate: "${t.game}" is not a Minecraft game, so there is `
+          + `nothing to check for updates. Set edition explicitly if this really is one.`,
+        );
+      }
+      for (const key of ['installDir', 'jar']) {
+        if (mu[key] !== undefined && mu[key] !== null && !isStr(mu[key])) {
+          errors.push(`${at}.minecraftUpdate.${key}: expected a path`);
+        }
+      }
+      if (mu.installDir === undefined && !t.startCommand) {
+        errors.push(
+          `${at}.minecraftUpdate.installDir: required here — it is normally taken `
+          + `from the folder startCommand lives in, and this target has no startCommand`,
+        );
+      }
+      if (mu.flavor !== undefined && !['vanilla', 'paper'].includes(mu.flavor)) {
+        errors.push(
+          `${at}.minecraftUpdate.flavor: expected "vanilla" (Mojang's server jar) or `
+          + `"paper" (PaperMC builds); got ${JSON.stringify(mu.flavor)}`,
+        );
+      }
+      if (mu.flavor !== undefined && edition === 'bedrock') {
+        errors.push(`${at}.minecraftUpdate.flavor: only means anything for a Java server`);
+      }
+      // "same" holds the Minecraft version and takes newer builds of it;
+      // "latest" follows releases; anything else is a version to pin to.
+      if (mu.track !== undefined && !isStr(mu.track)) {
+        errors.push(
+          `${at}.minecraftUpdate.track: expected "same" (stay on the installed `
+          + `Minecraft version, newer builds only), "latest" (follow releases), or a `
+          + `version to pin to such as "1.21.11"`,
+        );
+      }
+      if (mu.track !== undefined && edition === 'bedrock') {
+        errors.push(
+          `${at}.minecraftUpdate.track: only means anything for a Java server — `
+          + `Bedrock publishes one current build, and "preview" chooses the other channel`,
+        );
+      }
+      for (const key of ['auto', 'preview', 'enabled']) {
+        if (mu[key] !== undefined && typeof mu[key] !== 'boolean') {
+          errors.push(`${at}.minecraftUpdate.${key}: expected true or false`);
+        }
+      }
+
+      if (mu.preview !== undefined && edition === 'java') {
+        errors.push(`${at}.minecraftUpdate.preview: only means anything for a Bedrock server`);
+      }
+      if (mu.keep !== undefined) {
+        if (!Array.isArray(mu.keep) || mu.keep.some((k) => !isStr(k))) {
+          errors.push(
+            `${at}.minecraftUpdate.keep: expected an array of paths relative to the `
+            + `install folder that an update must not overwrite, e.g. ["scripts/start.bat"]. `
+            + `End one with "/" to protect a whole folder.`,
+          );
+        } else if (edition === 'java') {
+          errors.push(
+            `${at}.minecraftUpdate.keep: only means anything for a Bedrock server — `
+            + `a Java update replaces the server jar and touches nothing else`,
+          );
+        }
+      }
+    }
+  }
+
+  // Plugin updates, for a Paper/Spigot server. Every plugin is matched to a
+  // publisher explicitly -- from the built-in catalogue or from `sources` here
+  // -- so the shapes those entries can take are what this checks.
+  if (t.pluginUpdates !== undefined && t.pluginUpdates !== null) {
+    const pu = t.pluginUpdates;
+    if (typeof pu !== 'object' || Array.isArray(pu)) {
+      errors.push(`${at}.pluginUpdates: expected an object, e.g. { "auto": true }`);
+    } else {
+      if (t.game !== 'minecraft') {
+        errors.push(
+          `${at}.pluginUpdates: only a "minecraft" (Java) target has plugins — `
+          + `"${t.game}" does not`,
+        );
+      }
+      for (const key of ['enabled', 'auto', 'requireGameVersion']) {
+        if (pu[key] !== undefined && typeof pu[key] !== 'boolean') {
+          errors.push(`${at}.pluginUpdates.${key}: expected true or false`);
+        }
+      }
+      if (pu.dir !== undefined && !isStr(pu.dir)) {
+        errors.push(`${at}.pluginUpdates.dir: expected the path to the server's plugins folder`);
+      }
+      if (pu.sources !== undefined && pu.sources !== null) {
+        if (typeof pu.sources !== 'object' || Array.isArray(pu.sources)) {
+          errors.push(
+            `${at}.pluginUpdates.sources: expected an object keyed by the plugin's own `
+            + `name, e.g. { "Geyser-Spigot": { "provider": "geyser", "project": "geyser" } }`,
+          );
+        } else {
+          for (const [name, src] of Object.entries(pu.sources)) {
+            // false is how a catalogue entry is switched off for this server.
+            if (src === false || src === null) continue;
+            const where = `${at}.pluginUpdates.sources["${name}"]`;
+            if (typeof src !== 'object' || Array.isArray(src)) {
+              errors.push(`${where}: expected an object with a provider, or false to never update this plugin`);
+              continue;
+            }
+            const providers = ['geyser', 'modrinth', 'hangar', 'github', 'url'];
+            if (!providers.includes(src.provider)) {
+              errors.push(`${where}.provider: expected one of ${providers.join(', ')}; got ${JSON.stringify(src.provider)}`);
+              continue;
+            }
+            if (src.provider === 'github') {
+              check(errors, isStr(src.repo), `${where}.repo: required for github — "owner/name"`);
+              if (src.asset !== undefined) {
+                if (!isStr(src.asset)) {
+                  errors.push(`${where}.asset: expected a regular expression matching ONE jar in the release`);
+                } else {
+                  try {
+                    new RegExp(src.asset);
+                  } catch (err) {
+                    errors.push(`${where}.asset: not a valid regular expression — ${err.message}`);
+                  }
+                }
+              }
+            } else if (src.provider === 'url') {
+              check(errors, isStr(src.url), `${where}.url: required for url — the direct link to the jar`);
+            } else if (!isStr(src.project)) {
+              errors.push(`${where}.project: required for ${src.provider} — the project slug or name`);
+            }
+          }
+        }
+      }
+    }
+  }
+
   // An explicit mods folder, for a game whose profile does not guess one or
   // guesses wrong. Read-only: this only decides where the Mods panel looks. The
   // workshopMods block above is the separate, narrower thing that compares
@@ -451,10 +632,11 @@ function validateTarget(t, i, seen, errors) {
       errors.push(`${at}.mods: expected an object with a dir, e.g. { "dir": "C:\\\\GameServers\\\\X\\\\Mods" }`);
     } else {
       check(errors, isStr(m.dir), `${at}.mods.dir: required — the folder the server loads mods from`);
-      if (m.kind !== undefined && !['workshop', 'paks'].includes(m.kind)) {
+      if (m.kind !== undefined && !['workshop', 'paks', 'plugins'].includes(m.kind)) {
         errors.push(
           `${at}.mods.kind: expected "workshop" (one folder per mod, each with an `
-          + `InstallManifest.json) or "paks" (loose Unreal .pak files); got "${m.kind}"`,
+          + `InstallManifest.json), "paks" (loose Unreal .pak files) or "plugins" `
+          + `(Bukkit/Paper .jar files); got "${m.kind}"`,
         );
       }
     }
@@ -551,6 +733,9 @@ function validate(config, errors) {
     ['restart.graceSeconds', config.restart?.graceSeconds],
     ['steam.checkMinutes', config.steam?.checkMinutes],
     ['steam.waitMinutes', config.steam?.waitMinutes],
+    ['minecraft.checkMinutes', config.minecraft?.checkMinutes],
+    ['minecraft.downloadTimeoutMinutes', config.minecraft?.downloadTimeoutMinutes],
+    ['minecraft.extractTimeoutMinutes', config.minecraft?.extractTimeoutMinutes],
   ]) {
     check(errors, isNum(value) && value > 0, `${where}: expected a positive number, got ${JSON.stringify(value)}`);
   }
