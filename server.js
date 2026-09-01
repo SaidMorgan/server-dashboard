@@ -16,6 +16,7 @@ import { MinecraftUpdates } from './src/mcupdate.js';
 import { PluginUpdates } from './src/pluginupdate.js';
 import { WorkshopMods } from './src/workshop.js';
 import { inventory as modInventory, modSource } from './src/mods.js';
+import { CommandIndex, buildCommandList } from './src/commands.js';
 import { closeAll } from './src/rcon.js';
 import * as moderation from './src/moderation.js';
 
@@ -66,6 +67,9 @@ const workshop = new WorkshopMods(config, monitor, config.dataDir);
 // move on different schedules -- and must never move at the same moment, which
 // is what the otherBusy wiring below prevents. See src/pluginupdate.js.
 const pluginupdates = new PluginUpdates(config, monitor, config.dataDir);
+// Live command sweeps, cached. Needs actions for RCON; nothing sweeps until
+// something asks for a command list.
+const commandIndex = new CommandIndex(actions);
 
 // These know about each other, so the wiring happens here rather than through
 // constructor arguments that would be circular.
@@ -211,6 +215,34 @@ app.get('/api/mods/:id', (req, res) => {
     inv.canUpdate = pluginupdates.managed(t.id);
   }
   return res.json(inv);
+});
+
+app.get('/api/commands/:id', async (req, res) => {
+  const t = config.targets.find((x) => x.id === req.params.id);
+  if (!t) return res.status(404).json({ error: 'unknown target' });
+  const profile = t.kind === 'game' ? getProfile(t.game) : null;
+
+  const inv = modInventory(t, profile);
+  if (!inv.ok || inv.kind !== 'plugins') {
+    return res.json({ ok: false, error: 'this server has no plugins folder to read' });
+  }
+
+  // The jar half is a folder read and is therefore always current -- that is
+  // what makes the list update on a plain refresh with no button to press. The
+  // live half is a 40-page RCON walk, so a stale one is served as-is and a fresh
+  // sweep is kicked off for the next refresh to collect. ?refresh=1 waits.
+  let live;
+  if (req.query.refresh === '1') {
+    live = await commandIndex.refresh(t.id);
+  } else {
+    live = commandIndex.peek(t.id);
+    commandIndex.refreshSoon(t.id);
+  }
+
+  const payload = buildCommandList(inv, live);
+  if (payload.live) payload.live.stale = commandIndex.isStale(t.id);
+  payload.pending = !live;
+  return res.json(payload);
 });
 
 app.get('/api/history/:id', (req, res) => {

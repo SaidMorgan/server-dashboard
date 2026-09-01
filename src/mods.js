@@ -440,6 +440,10 @@ function readPlugins(source) {
       // depend is required-to-load; softdepend only fixes the load order, so
       // listing it as "needs" would be a lie the panel keeps repeating.
       dependencies: meta.depend ?? [],
+      // What the jar says it registers. Empty is not the same as "no commands":
+      // a Paper plugin using Brigadier declares none here and still has them.
+      // src/commands.js is where that gap gets filled in from the live server.
+      commands: meta.commands ?? [],
       tags: [],
       workshopId: null,
       installedAt: Math.round(stat.mtimeMs),

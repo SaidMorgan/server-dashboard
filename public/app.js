@@ -158,7 +158,14 @@ function buildCard(target) {
   }
 
   const rconInput = node.querySelector('.rcon-input');
-  wireCommandPicker(node, rconInput, caps.consoleCommands || [], caps.consoleArgs || {}, target.id);
+  // The array is mutated in place by the feed below, so the danger check in
+  // sendRcon sees discovered commands too rather than only the curated ones.
+  caps.consoleCommands = caps.consoleCommands || [];
+  commandFeeds.set(target.id,
+    wireCommandPicker(node, rconInput, caps.consoleCommands, caps.consoleArgs || {}, target.id));
+  // Not deferred until the Commands panel is opened: the point of this is Tab
+  // completion in the console, and nobody opens a reference panel first.
+  primeCommandPicker(target.id);
 
   const sendRcon = async () => {
     const command = rconInput.value.trim();
@@ -198,12 +205,382 @@ function buildCard(target) {
   wireSchedules(target, node);
   wireBackups(target, node);
   wireMods(target, node);
+  wireCommands(target, node);
   wireModeration(target, node);
 
   cardsEl.append(node);
   cards.set(target.id, node);
   loadHistory(target.id, node);
   return node;
+}
+
+// --- feeding discovered commands into the console ---------------------------
+//
+// The picker above is a curated per-game list: a handful of commands with
+// argument hints and danger flags, which is what makes "gamerule <rule>
+// <value>" complete a rule and then true/false. It knows nothing about the
+// plugins installed on any particular server.
+//
+// /api/commands supplies those, so they are appended to the same array the
+// typeahead already reads. They come in weaker -- a bare command word, no
+// argument shapes -- but that is enough for Tab to finish "/herobrinest" and
+// enough for the dropdown to list them.
+
+const commandFeeds = new Map(); // target id -> the adder returned by wireCommandPicker
+
+// Commands worth a confirm even though nothing declared them dangerous. The
+// curated lists carry their own flags; this is only for discovered rows, where
+// the alternative is no warning at all on a command that stops the server.
+const RISKY_DISCOVERED = /^(stop|restart|reload|rl|end|kill|killall|op|deop|ban|ban-ip|banip|pardon|kick|whitelist|save-off|purge|wipe|reset|deleteallclaims|deleteclaimsinworld|ecoadmin)$/i;
+
+// --- turning a declared usage string into completable shapes -----------------
+//
+// Without this a discovered command is a single bare word and Tab has nothing to
+// say after it -- you are expected to already know that /herobrine takes
+// "status". The usage line in plugin.yml does know, so it is parsed into the
+// same slot shapes the curated lists use, which buys two things for free from
+// the existing typeahead: <a|b> alternatives become suggestable words, and
+// <player> completes with whoever is actually online.
+//
+// It is defensive on purpose. Real usage strings on this server include prose
+// running off the end ("<player>  Grants a player permission to build."), a bare
+// "|", the literal "or", nested brackets, and one plugin whose usage misspells
+// its own command as /spawan. Anything not understood is dropped rather than
+// guessed at, leaving that command exactly as good as it was before.
+
+// Split on whitespace, but keep a bracket group together however deeply it
+// nests: "[status|wake [minutes]|sleep]" is one token, not two.
+function tokenizeUsage(text) {
+  const out = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of text) {
+    if (ch === '<' || ch === '[') depth += 1;
+    if (ch === '>' || ch === ']') depth = Math.max(0, depth - 1);
+    if (/\s/.test(ch) && depth === 0) {
+      if (cur) { out.push(cur); cur = ''; }
+      continue;
+    }
+    cur += ch;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+// "status|wake [minutes]|sleep" -> ["status", "wake [minutes]", "sleep"],
+// splitting only on the bars that are not inside a nested group.
+function splitAlternatives(inner) {
+  const out = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of inner) {
+    if (ch === '<' || ch === '[') depth += 1;
+    if (ch === '>' || ch === ']') depth = Math.max(0, depth - 1);
+    if (ch === '|' && depth === 0) { out.push(cur.trim()); cur = ''; continue; }
+    cur += ch;
+  }
+  out.push(cur.trim());
+  const bars = out.filter(Boolean);
+  // TPA spells its choices with slashes rather than bars -- [player/warp/spawn].
+  // Only applied when bars found nothing and the group is a single bare word
+  // run, so a placeholder that happens to contain a slash is left alone.
+  if (bars.length === 1 && /^[^\s<>[\]]+\/[^\s<>[\]]+$/.test(bars[0])) {
+    return bars[0].split('/').map((s) => s.trim()).filter(Boolean);
+  }
+  return bars;
+}
+
+// Placeholder names that mean "a player" in a language the typeahead's own
+// player detection does not read. TPA is a Chinese-language plugin and its
+// /tpa <玩家名称> is one of the most-used commands on this server, so it is
+// worth the entry to have it complete real names.
+const PLAYER_WORDS = { '玩家名称': 'player', 'jugador': 'player', 'spieler': 'player' };
+
+// What to call a placeholder so the typeahead recognises it. Anything that
+// looks like a player becomes exactly "player", which is the name its own
+// option lookup keys on -- that covers <playerName>, <player1>, <player name>
+// and the translated spellings in one rule. Everything else keeps its name and
+// simply has no options to offer, which is still better than being mistaken for
+// a literal word the user is expected to type.
+function placeholderName(raw) {
+  const name = PLAYER_WORDS[raw.trim()] || raw.trim();
+  if (/player|gamertag/i.test(name)) return 'player';
+  return name.replace(/\s+/g, ''); // slots are split on whitespace; a two-word one would break
+}
+
+const BRACKETED = /^[<[](.*)[>\]]$/;
+const MAX_VARIANTS = 12;
+
+// Square brackets are ambiguous in Bukkit usage strings and the two meanings
+// need opposite treatment: "[reload]" is a word you type, "[player]" is a value
+// you supply. Angle brackets are never ambiguous -- always a value. So a lone
+// square-bracket group is only treated as a value when it names one.
+const VALUE_WORDS = /^(player|players|target|name|username|gamertag|amount|number|num|count|radius|size|distance|world|minutes|seconds|time|state|category|item|block|tool|page|value|id|level|reason|message|text|x|y|z)$/i;
+
+// Anything outside ASCII is an argument described in another language, not an
+// English subcommand anyone types: TPA writes "[player/warp/spawn]" (words to
+// type) alongside "[玩家名称/传送点名称]" (descriptions of values). Without this
+// the second one lands in the console as literal text to send.
+const NON_ASCII = /[^ -]/;
+
+/**
+ * One alternative inside a bracket group, as slot text.
+ *
+ * @param choice   true when the group offered several alternatives, which makes
+ *                 plain words literal subcommands rather than value names
+ * @param optional true for a [square] group, false for an <angle> one
+ */
+function renderAlt(alt, { choice, optional }) {
+  const pieces = tokenizeUsage(alt);
+  // Something like "wake [minutes]": a literal followed by its own slot.
+  if (pieces.some((x) => BRACKETED.test(x))) {
+    return pieces.map((piece) => {
+      const inner = piece.match(BRACKETED);
+      return inner ? `<${placeholderName(inner[1])}>` : piece;
+    });
+  }
+  const translated = Boolean(PLAYER_WORDS[alt.trim()]) || NON_ASCII.test(alt);
+  const isValue = translated
+    || (choice ? false : (!optional || VALUE_WORDS.test(alt.trim())));
+  return isValue ? [`<${placeholderName(alt)}>`] : [alt];
+}
+
+// One usage line -> the command patterns it describes. Returns [] when there is
+// nothing beyond the command word itself.
+function expandUsage(name, usage) {
+  if (!usage || !/[<[]/.test(usage)) return [];
+  const tokens = tokenizeUsage(usage.replace(/^\//, '').trim());
+  if (!tokens.length) return [];
+
+  // The first token is the command's own name however it was spelled -- Bukkit's
+  // literal "<command>", the real name, or a typo. It is never an argument, so
+  // it is always replaced with the name we actually know.
+  let forms = [[name]];
+
+  for (const token of tokens.slice(1)) {
+    const m = token.match(BRACKETED);
+    // Prose, "or", a stray "|": everything from here on is not a slot, and the
+    // slots already collected are still good.
+    if (!m) break;
+
+    const optional = token.startsWith('[');
+    const alts = splitAlternatives(m[1]);
+    const next = [];
+
+    for (const form of forms) {
+      // An optional group means the command is also valid without it.
+      if (optional) next.push(form);
+      for (const alt of alts) {
+        if (!alt) continue;
+        next.push([...form, ...renderAlt(alt, { choice: alts.length > 1, optional })]);
+      }
+    }
+    forms = next;
+    if (forms.length > MAX_VARIANTS) return [];
+  }
+
+  // A single form that is just the bare name adds nothing over the plain row.
+  return forms.map((f) => f.join(' ')).filter((f) => f !== name);
+}
+
+// The API payload flattened into picker rows. Aliases become rows of their own:
+// /hbstrike is the spelling anyone will actually type, and Tab cannot offer it
+// if it only exists inside another row's description.
+function toPickerRows(payload) {
+  const rows = [];
+  const push = (name, description, from, usage) => {
+    if (!name || /[^\w+.-]/.test(name)) return; // a name with a space is not a command word
+    const meta = {
+      description: [description, from].filter(Boolean).join(' · '),
+      danger: RISKY_DISCOVERED.test(name),
+      discovered: true,
+    };
+    rows.push({ command: name, ...meta });
+    // The expanded shapes are what Tab walks; they are flagged so the dropdown
+    // can still show one tidy row per command instead of every branch of it.
+    for (const form of expandUsage(name, usage)) {
+      rows.push({ command: form, ...meta, variant: true });
+    }
+  };
+
+  for (const g of payload.plugins ?? []) {
+    for (const c of g.commands ?? []) {
+      push(c.name, c.description, g.plugin, c.usage);
+      for (const a of c.aliases ?? []) push(a, `alias for /${c.name}`, g.plugin, c.usage);
+    }
+  }
+  // Runtime-registered commands have no plugin to name them after; vanilla is
+  // deliberately left out, since the curated list already covers what is worth
+  // reaching for and 88 more rows would bury it.
+  for (const c of payload.runtime ?? []) push(c.name, c.description, null);
+  return rows;
+}
+
+async function primeCommandPicker(id, { retry = true } = {}) {
+  const feed = commandFeeds.get(id);
+  if (!feed) return 0;
+  let res;
+  try {
+    res = await api(`/api/commands/${id}`);
+  } catch {
+    return 0; // no console commands beyond the curated ones; nothing else breaks
+  }
+  if (!res?.ok) return 0;
+  const added = feed(toPickerRows(res));
+
+  // The first call lands before the live /help sweep it just kicked off has
+  // finished, so the runtime-registered commands -- /jobs, /prism, /ah -- are
+  // not in that payload yet. Come back for them once. Re-feeding is safe: the
+  // adder drops anything already present.
+  if (res.pending && retry) {
+    setTimeout(() => primeCommandPicker(id, { retry: false }), 12000);
+  }
+  return added;
+}
+
+// --- commands panel ---------------------------------------------------------
+//
+// Every command the plugins on this server provide, read out of the jars on each
+// open so adding a plugin is enough to make it appear -- there is no list here to
+// maintain. The server's own /help fills in what the jars cannot declare; see
+// src/commands.js for why both halves are needed.
+
+function cmdRow(c, targetId) {
+  const aliases = c.aliases?.length
+    ? `<span class="cmd-alias">${escapeHtml(c.aliases.map((a) => `/${a}`).join(' '))}</span>` : '';
+  // "declared but not registered" is the one state worth flagging: it usually
+  // means the plugin failed to load, or the server is down.
+  const flag = c.source === 'jar'
+    ? '<span class="cmd-flag" title="Declared in the jar but not registered on the running server">not live</span>'
+    : '';
+  const perm = c.permission
+    ? `<span class="cmd-perm" title="Permission node">${escapeHtml(c.permission)}</span>` : '';
+  const desc = c.description ? `<div class="cmd-desc">${escapeHtml(c.description)}</div>` : '';
+  const usage = c.usage && c.usage !== `/${c.name}`
+    ? `<div class="cmd-usage">${escapeHtml(c.usage)}</div>` : '';
+  return `<li class="cmd" data-cmd="${escapeHtml(c.name)}" data-target="${escapeHtml(targetId)}">
+    <div class="cmd-head"><code>/${escapeHtml(c.name)}</code>${aliases}${flag}${perm}</div>
+    ${desc}${usage}</li>`;
+}
+
+function renderCommands(node, res, targetId) {
+  const list = node.querySelector('.cmdlist');
+  const groups = [];
+
+  for (const g of res.plugins ?? []) {
+    groups.push(`<div class="cmd-group"><h4>${escapeHtml(g.plugin)}`
+      + `${g.version ? ` <span class="cmd-ver">${escapeHtml(g.version)}</span>` : ''}</h4>`
+      + `<ul>${g.commands.map((c) => cmdRow(c, targetId)).join('')}</ul></div>`);
+  }
+
+  // Registered but claimed by no jar. This is where a Brigadier command and a
+  // plugin that names its command in its own config end up, so it is a real
+  // section rather than a leftovers bin.
+  if (res.runtime?.length) {
+    groups.push('<div class="cmd-group"><h4>Registered at runtime '
+      + '<span class="cmd-ver">no jar declares these</span></h4>'
+      + `<ul>${res.runtime.map((c) => cmdRow(c, targetId)).join('')}</ul></div>`);
+  }
+  if (res.vanilla?.length) {
+    groups.push(`<details class="cmd-group cmd-vanilla"><summary>Vanilla Minecraft (${res.vanilla.length})</summary>`
+      + `<ul>${res.vanilla.map((c) => cmdRow(c, targetId)).join('')}</ul></details>`);
+  }
+
+  list.innerHTML = groups.length ? groups.join('') : '<div class="empty">no commands found</div>';
+}
+
+function filterCommands(node, term) {
+  const q = term.trim().toLowerCase();
+  let shown = 0;
+  node.querySelectorAll('.cmdlist .cmd').forEach((li) => {
+    const hit = !q || li.textContent.toLowerCase().includes(q);
+    li.classList.toggle('hidden', !hit);
+    if (hit) shown += 1;
+  });
+  // A group whose every row is filtered out is just a heading with nothing
+  // under it, so it goes too.
+  node.querySelectorAll('.cmdlist .cmd-group').forEach((g) => {
+    g.classList.toggle('hidden', !g.querySelector('.cmd:not(.hidden)'));
+  });
+  return shown;
+}
+
+async function loadCommands(id, node, { refresh = false } = {}) {
+  const details = node.querySelector('details.commands');
+  if (!details) return;
+  const status = node.querySelector('.cmd-status');
+  const count = node.querySelector('.cmd-count');
+  const where = node.querySelector('.cmd-where');
+
+  let res;
+  try {
+    res = await api(`/api/commands/${id}${refresh ? '?refresh=1' : ''}`);
+  } catch {
+    return;
+  }
+
+  // A server with no plugins folder has nothing to show; hide rather than
+  // display an empty panel that looks broken.
+  if (!res.ok) { details.classList.add('hidden'); return; }
+  details.classList.remove('hidden');
+
+  const c = res.counts || {};
+  count.textContent = `· ${c.declared || 0} from ${c.plugins || 0} plugin${c.plugins === 1 ? '' : 's'}`
+    + (res.runtime?.length ? ` · ${res.runtime.length} runtime` : '');
+
+  renderCommands(node, res, id);
+  const filter = node.querySelector('.cmd-filter');
+  if (filter?.value) filterCommands(node, filter.value);
+
+  // Be explicit about which half of the list is live and which is from disk --
+  // "not live" flags mean nothing if you cannot tell the sweep never ran.
+  if (res.pending) {
+    status.textContent = 'reading commands from the server…';
+    status.className = 'cmd-status';
+  } else if (res.live?.error) {
+    status.textContent = `server list unavailable — ${res.live.error}`;
+    status.className = 'cmd-status warn';
+  } else if (res.live) {
+    status.textContent = `server list read ${fmtTime(res.live.at)}${res.live.stale ? ' (refreshing)' : ''}`;
+    status.className = 'cmd-status';
+  }
+
+  where.innerHTML = '<div>Read from the plugin jars on every open, so a new plugin '
+    + 'shows up here as soon as it is installed. Click a command to put it in the console box.</div>';
+}
+
+function wireCommands(target, node) {
+  const details = node.querySelector('details.commands');
+  if (!details) return;
+
+  details.addEventListener('toggle', function () {
+    if (this.open) loadCommands(target.id, node);
+  });
+
+  node.querySelector('.cmd-refresh').addEventListener('click', async (event) => {
+    const btn = event.currentTarget;
+    btn.classList.add('busy');
+    await loadCommands(target.id, node, { refresh: true });
+    await primeCommandPicker(target.id, { retry: false });
+    btn.classList.remove('busy');
+  });
+
+  const filter = node.querySelector('.cmd-filter');
+  filter.addEventListener('input', () => filterCommands(node, filter.value));
+
+  // Clicking a row loads it into the console rather than running it. Most of
+  // these carry no argument hints, so a click would often send an incomplete
+  // command -- and a click that runs something is a bad default next to a list
+  // this long anyway.
+  node.querySelector('.cmdlist').addEventListener('click', (event) => {
+    const li = event.target.closest('.cmd');
+    if (!li) return;
+    const input = node.querySelector('.rcon-input');
+    if (!input) return;
+    input.value = li.dataset.cmd;
+    input.focus();
+    input.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  });
 }
 
 // --- console command picker -------------------------------------------------
@@ -244,11 +621,8 @@ function selectPlaceholder(input) {
 }
 
 function wireCommandPicker(node, input, commands, argValues, targetId) {
-  if (!commands.length) return; // profile ships no list; plain text box as before
-
   const select = node.querySelector('.rcon-pick');
   const help = node.querySelector('.cmd-help');
-  node.querySelector('.rcon-pickrow').classList.remove('hidden');
 
   const option = (c) => {
     const el = document.createElement('option');
@@ -258,22 +632,35 @@ function wireCommandPicker(node, input, commands, argValues, targetId) {
     return el;
   };
 
-  const safe = commands.filter((c) => !c.danger);
-  const risky = commands.filter((c) => c.danger);
-  const group = (label, rows) => {
-    if (!rows.length) return;
-    const g = document.createElement('optgroup');
-    g.label = label;
-    rows.forEach((c) => g.append(option(c)));
-    select.append(g);
+  // Rebuilt rather than appended to, because discovered commands arrive after
+  // the card is already on screen and the curated ones must stay on top.
+  const fill = () => {
+    select.innerHTML = '<option value="">Commands…</option>';
+    const group = (label, rows) => {
+      if (!rows.length) return;
+      const g = document.createElement('optgroup');
+      g.label = label;
+      rows.forEach((c) => g.append(option(c)));
+      select.append(g);
+    };
+    const curated = commands.filter((c) => !c.discovered);
+    const found = commands.filter((c) => c.discovered && !c.variant);
+    const risky = curated.filter((c) => c.danger);
+    const safe = curated.filter((c) => !c.danger);
+    // Only split the curated list when there is something to warn about.
+    if (risky.length) {
+      group('Commands', safe);
+      group('Careful — affects everyone', risky);
+    } else {
+      safe.forEach((c) => select.append(option(c)));
+    }
+    // Kept as its own group and kept last: these come with no argument hints
+    // and no danger flags, so they are a weaker thing than the curated rows
+    // above and should not be mixed in among them.
+    group('From plugins on this server', found);
+    node.querySelector('.rcon-pickrow').classList.toggle('hidden', !commands.length);
   };
-  // Only split into groups when there is something to warn about.
-  if (risky.length) {
-    group('Commands', safe);
-    group('Careful — affects everyone', risky);
-  } else {
-    safe.forEach((c) => select.append(option(c)));
-  }
+  fill();
 
   const showHelp = (entry) => {
     help.classList.toggle('hidden', !entry?.description);
@@ -297,6 +684,33 @@ function wireCommandPicker(node, input, commands, argValues, targetId) {
   input.addEventListener('input', () => showHelp(findCommand(commands, input.value)));
 
   wireTypeahead(node, input, commands, argValues || {}, targetId, showHelp);
+
+  // How discovered commands get in later. The array is captured by reference by
+  // wireTypeahead, so pushing into it is enough for Tab completion; the select
+  // is the only part that has to be told.
+  return (rows) => {
+    // Two different tests. `leads` is which command *words* are already spoken
+    // for, so a curated entry keeps its argument hints and the discovered bare
+    // word is dropped. `seen` is exact strings, so the expanded variants of a
+    // command can all go in without colliding with each other.
+    const leads = new Set(commands.map((c) => commandLead(c.command)[0]).filter(Boolean));
+    const seen = new Set(commands.map((c) => c.command.toLowerCase()));
+    const curated = new Set(leads);
+    let added = 0;
+    for (const r of rows) {
+      const lead = commandLead(r.command)[0];
+      // Dropping the base word to a curated entry has to drop its variants too,
+      // or the curated shape and a half-parsed usage line would both be offered.
+      if (curated.has(lead)) continue;
+      if (seen.has(r.command.toLowerCase())) continue;
+      seen.add(r.command.toLowerCase());
+      leads.add(lead);
+      commands.push(r);
+      added += 1;
+    }
+    if (added) fill();
+    return added;
+  };
 }
 
 // --- next-word suggestions ---------------------------------------------------

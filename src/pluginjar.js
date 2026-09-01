@@ -109,10 +109,10 @@ function readEntry(fd, size, names) {
 // --- the smallest YAML that reads a plugin.yml ------------------------------
 
 // Not a YAML parser, and not trying to be. A plugin.yml is mostly `key: value`
-// at column zero with two shapes of list, and the parts this cannot read
-// (commands:, permissions: -- nested maps, and none of our business) are exactly
-// the parts that indent, so ignoring every indented line is both the simplest
-// rule and the correct one.
+// at column zero with two shapes of list, and the nested maps this cannot read
+// (permissions:, and commands: before parseCommands below went and read it
+// separately) are exactly the parts that indent, so ignoring every indented line
+// is both the simplest rule and the correct one.
 function unquote(s) {
   const t = s.trim();
   if (t.length >= 2 && ((t[0] === '"' && t.endsWith('"')) || (t[0] === "'" && t.endsWith("'")))) {
@@ -149,6 +149,93 @@ function parseYaml(text) {
     }
     out[key] = unquote(value);
   }
+  return out;
+}
+
+// --- the commands: block ----------------------------------------------------
+
+// One level deeper than parseYaml goes, and only for this one key. A command
+// entry is `name:` at the block's own indent with `description`/`usage`/
+// `aliases`/`permission` under it, which is a shallow enough shape to read
+// without turning this into a real YAML parser.
+//
+// Worth knowing what this CANNOT see, because it is not a small gap: Paper
+// plugins register commands through Brigadier at runtime and declare nothing in
+// paper-plugin.yml, and plugins like UJobs take their command name from their
+// own config.yml. Neither shows up here. Whatever consumes this needs a live
+// source as well if it wants the real list.
+const COMMAND_FIELDS = new Set(['description', 'usage', 'permission', 'aliases']);
+const MAX_COMMANDS = 200;
+
+function indentOf(line) {
+  return line.length - line.trimStart().length;
+}
+
+export function parseCommands(text) {
+  const lines = text.split(/\r?\n/);
+
+  let start = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (/^commands:\s*(#.*)?$/.test(lines[i])) { start = i + 1; break; }
+  }
+  if (start === -1) return [];
+
+  const out = [];
+  let base = null;
+  let current = null;
+  let lastKey = null;
+
+  for (let i = start; i < lines.length; i += 1) {
+    const raw = lines[i];
+    if (!raw.trim() || raw.trim().startsWith('#')) continue;
+
+    const indent = indentOf(raw);
+    if (indent === 0) break; // back out to a top-level key: the block is over
+    if (base === null) base = indent;
+    if (indent < base) break; // dedented past where we started
+
+    const body = raw.trim();
+
+    if (indent === base) {
+      const at = body.indexOf(':');
+      if (at <= 0) continue;
+      const name = unquote(body.slice(0, at));
+      if (!name || out.length >= MAX_COMMANDS) continue;
+      current = { name, description: null, usage: null, permission: null, aliases: [] };
+      out.push(current);
+      lastKey = null;
+      continue;
+    }
+
+    if (!current) continue;
+
+    // An indented "- x" continues the last field, which in practice is aliases.
+    const item = body.match(/^-\s*(.*)$/);
+    if (item) {
+      if (lastKey === 'aliases') {
+        const alias = unquote(item[1]);
+        if (alias) current.aliases.push(alias);
+      }
+      continue;
+    }
+
+    const at = body.indexOf(':');
+    if (at <= 0) continue;
+    const key = body.slice(0, at).trim();
+    const value = body.slice(at + 1).trim();
+    lastKey = key;
+    if (!COMMAND_FIELDS.has(key)) continue;
+
+    if (key === 'aliases') {
+      if (value.startsWith('[')) {
+        current.aliases = value.replace(/^\[|\]$/g, '').split(',').map(unquote).filter(Boolean);
+      }
+      // A bare "aliases:" means a block list follows; lastKey now catches it.
+      continue;
+    }
+    if (value) current[key] = unquote(value);
+  }
+
   return out;
 }
 
@@ -195,6 +282,9 @@ export function readPluginJar(file) {
       website: str(y.website),
       depend: list(y.depend),
       softdepend: list(y.softdepend),
+      // Read from the same buffer rather than reopening the jar: the zip seek
+      // above is the expensive half and there is no reason to pay it twice.
+      commands: parseCommands(buf.toString('utf8')),
     };
   } catch {
     return null;
