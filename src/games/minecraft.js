@@ -57,6 +57,30 @@ export default {
     { command: 'difficulty <difficulty>', description: 'Change the difficulty' },
     { command: 'seed', description: 'Show the world seed' },
     { command: 'stop', description: 'Save and shut the server down — it will not come back on its own', danger: true },
+
+    // Prism registers everything through Brigadier, so its jar declares no
+    // commands and the live /help sweep finds a bare "prism" with nothing under
+    // it. Spelling the subcommands out here is the only way the console can
+    // offer them -- the list is read off Prism 4.4's own command classes.
+    //
+    // The first two are answered by the dashboard, not by the server: see
+    // src/playerstats.js. They sit under `prism` because that is where an admin
+    // already looks, and neither name exists in Prism itself.
+    { command: 'prism players', description: 'Everyone who has ever played — balance, blocks broken, last seen' },
+    { command: 'prism stats <knownPlayer>', description: 'One player in full: blocks, shop, earnings, and sold-vs-mined integrity' },
+    { command: 'prism lookup <prismQuery>', description: 'Search the block log. Parameters: p:<player> a:<action> b:<block> r:<radius> w:<world> before:<date> since:<date> in:<chunk|world> at:<x,y,z> id:<n> reversed' },
+    { command: 'prism page <n>', description: 'Another page of the last lookup' },
+    { command: 'prism near', description: 'Recent activity around you — in game only, the console has no location' },
+    { command: 'prism status', description: 'Whether Prism is recording, and how big its write queue is' },
+    { command: 'prism about', description: 'Prism version and links' },
+    { command: 'prism vault', description: 'Browse lookup results in a chest UI — in game only' },
+    { command: 'prism wand <prismWand>', description: 'Give yourself an inspection or rollback wand — in game only' },
+    { command: 'prism preview <prismPreview>', description: 'Show a rollback or restore before committing it — in game only' },
+    { command: 'prism teleport <n>', description: 'Teleport to the activity on that result row — in game only' },
+    { command: 'prism rollback <prismQuery>', description: 'Undo everything the query matches. Same parameters as lookup — run it as a lookup first', danger: true },
+    { command: 'prism restore <prismQuery>', description: 'Re-apply everything the query matches, undoing a rollback', danger: true },
+    { command: 'prism undo', description: 'Reverse your own last rollback or restore', danger: true },
+    { command: 'prism purge <prismQuery>', description: 'Delete matching rows from the block log permanently — this is not a rollback', danger: true },
   ],
 
   // Options for the <placeholders> above, so the console can suggest the next
@@ -90,6 +114,22 @@ export default {
       { value: 'clear', description: 'Stop rain and storms' },
       { value: 'rain', description: 'Start rain' },
       { value: 'thunder', description: 'Start a thunderstorm' },
+    ],
+    // Filled from /api/players — everybody the block log and the economy
+    // remember, not only whoever happens to be online, because looking up a
+    // player who is not here is the entire point of the command.
+    knownPlayer: '@knownPlayers',
+    prismWand: [
+      { value: 'inspect', description: 'Right-click a block to see its history' },
+      { value: 'rollback', description: 'Right-click to undo changes at that block' },
+      { value: 'restore', description: 'Right-click to re-apply changes at that block' },
+      { value: 'off', description: 'Put the wand away' },
+    ],
+    prismPreview: [
+      { value: 'apply', description: 'Commit the preview you are looking at' },
+      { value: 'cancel', description: 'Throw the preview away' },
+      { value: 'rollback', description: 'Preview a rollback rather than doing it' },
+      { value: 'restore', description: 'Preview a restore rather than doing it' },
     ],
     whitelistAction: [
       { value: 'list', description: 'Show who is on the whitelist' },

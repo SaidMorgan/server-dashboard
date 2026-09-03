@@ -32,13 +32,19 @@ export const QUERY_PROTOCOLS = ['a2s', 'raknet'];
 
 const registry = new Map();
 
+// The lists the browser fills in for itself rather than reading from a profile,
+// because the answer changes while the page is open. '@players' is whoever is
+// online this minute; '@knownPlayers' is everyone who has ever played, fetched
+// from /api/players -- see resolveOptions() in public/app.js.
+const DYNAMIC_OPTIONS = ['@players', '@playerIds', '@knownPlayers'];
+
 // One list of suggestions, from a profile that may have written it the short
-// way. Accepts '@players', a bare array of strings, or full option objects, and
-// throws away anything it cannot make sense of rather than shipping it to the
-// browser. Depth is capped because `values` nests: a rule offers values, and
-// each of those could in principle offer more.
+// way. Accepts one of the dynamic lists above, a bare array of strings, or full
+// option objects, and throws away anything it cannot make sense of rather than
+// shipping it to the browser. Depth is capped because `values` nests: a rule
+// offers values, and each of those could in principle offer more.
 function normalizeOptions(list, depth = 0) {
-  if (list === '@players') return '@players';
+  if (DYNAMIC_OPTIONS.includes(list)) return list;
   if (!Array.isArray(list) || depth > 4) return null;
   const rows = list
     .map((o) => (typeof o === 'string' ? { value: o } : o))

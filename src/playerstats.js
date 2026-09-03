@@ -71,6 +71,9 @@ export function resolveDirs(target) {
     prismDb: path.join(plugins, 'prism', 'prism.db'),
     tneAccounts: path.join(plugins, 'TheNewEconomy', 'accounts'),
     tneTransactions: path.join(plugins, 'TheNewEconomy', 'transactions'),
+    // Where C:\Apps\tne-archive.py folds those yml files once they are safely
+    // in SQLite. The loose files are an intermediary now, not the record.
+    tneArchive: path.join(plugins, 'TheNewEconomy', 'archive', 'transactions.db'),
     shopDatas: path.join(plugins, 'UltimateShop', 'datas'),
     shopDefs: path.join(plugins, 'UltimateShop', 'shops'),
   };
@@ -194,12 +197,56 @@ function readBalances(dirs) {
  * off the number rather than off the `operation` field. Trusting `operation`
  * here reports every player as having spent nothing at all.
  */
+/**
+ * The folded archive, summed in SQL. Returns how many transactions it covered.
+ *
+ * Opened read-only, and a missing or unreadable database is not an error: the
+ * archive is an optimisation over the yml files, so a server that has never run
+ * the archiver must still answer the question from the loose files alone.
+ */
+function sweepArchive(dirs, take) {
+  if (!dirs.tneArchive || !fs.existsSync(dirs.tneArchive)) return 0;
+  let db;
+  try {
+    db = new DatabaseSync(dirs.tneArchive, { readOnly: true });
+    // One row per account per source, which is precisely the shape the report
+    // wants -- the per-source breakdown and the in/out split both fall out of
+    // it without touching a single transaction row in JavaScript.
+    const rows = db.prepare(`
+      SELECT account_id AS uuid,
+             source_name AS source,
+             SUM(CAST(amount AS REAL)) AS net,
+             SUM(CASE WHEN CAST(amount AS REAL) > 0 THEN CAST(amount AS REAL) ELSE 0 END) AS gained,
+             SUM(CASE WHEN CAST(amount AS REAL) < 0 THEN -CAST(amount AS REAL) ELSE 0 END) AS spent,
+             COUNT(*) AS n
+        FROM transactions
+       WHERE account_id IS NOT NULL
+       GROUP BY account_id, source_name`).all();
+
+    let counted = 0;
+    for (const r of rows) {
+      const acc = take(String(r.uuid));
+      acc.in += Number(r.gained) || 0;
+      acc.out += Number(r.spent) || 0;
+      const source = r.source == null ? '?' : String(r.source);
+      acc.bySource.set(source, (acc.bySource.get(source) || 0) + (Number(r.net) || 0));
+      counted += Number(r.n) || 0;
+    }
+    return counted;
+  } catch {
+    // A half-written database during a fold is a reason to fall back to the yml
+    // files, not a reason for the whole command to fail.
+    return 0;
+  } finally {
+    try { db?.close(); } catch { /* already gone */ }
+  }
+}
+
 function sweepTransactions(dirs) {
   const fresh = txCache.byPlayer
     && txCache.dir === dirs.tneTransactions
     && Date.now() - txCache.at < TX_TTL_MS;
   if (fresh) return txCache;
-  if (!fs.existsSync(dirs.tneTransactions)) return null;
 
   const byPlayer = new Map();
   const take = (uuid) => {
@@ -211,13 +258,40 @@ function sweepTransactions(dirs) {
 
   let scanned = 0;
   let truncated = false;
-  let files;
-  try { files = fs.readdirSync(dirs.tneTransactions); } catch { return null; }
+
+  // The archive first. Almost every transaction that has ever happened lives
+  // here, and the sum is done in SQL rather than by reading rows out one at a
+  // time -- that is the whole reason the folding exists, and it turns the
+  // expensive part of this command into a single indexed aggregate.
+  //
+  // Archived rows are read as one-sided, which is what they are: every one of
+  // the sixty-one thousand records folded on 2026-09-02 had a `to` and no
+  // `from`. A two-sided transfer would still be recorded in full in raw_json,
+  // so nothing is lost on disk if TNE ever starts writing them -- but `traded`
+  // would need reading that column back, and inventing the machinery for a case
+  // that has never occurred would be the wrong trade.
+  const archived = sweepArchive(dirs, take);
+  scanned += archived;
+
+  // Then whatever has landed since the last fold. With the archiver running
+  // nightly at zero lag this is minutes of files, not months of them.
+  let files = [];
+  if (fs.existsSync(dirs.tneTransactions)) {
+    try { files = fs.readdirSync(dirs.tneTransactions); } catch { files = []; }
+  } else if (!archived) {
+    return null;
+  }
+  // The budget counts files opened, not transactions covered. Rows already in
+  // SQLite cost an indexed aggregate between them, so charging them against a
+  // limit that exists to bound *file reads* would start reporting the figure as
+  // partial precisely as the archive got good at its job.
+  let filesRead = 0;
   for (const file of files) {
-    if (scanned >= TX_FILE_BUDGET) { truncated = true; break; }
+    if (filesRead >= TX_FILE_BUDGET) { truncated = true; break; }
     if (!file.endsWith('.yml')) continue;
     let text;
     try { text = fs.readFileSync(path.join(dirs.tneTransactions, file), 'utf8'); } catch { continue; }
+    filesRead++;
     scanned++;
 
     const source = (text.match(/^source:\n\s+type:\s*\S+\n\s+name:\s*(.+)$/m) || [, '?'])[1].trim();
@@ -523,35 +597,106 @@ export function playerStats(target, rawName) {
   return { ok: true, body: L.join('\n') };
 }
 
-/** Every player at a glance, for `prism stats` with no name. */
-export function playerLeaderboard(target) {
+/**
+ * Everyone who has ever played, from both stores that remember them.
+ *
+ * Prism knows anybody who has touched a block, TheNewEconomy knows anybody who
+ * has held money, and neither is a superset of the other -- a child who only
+ * ever built has no account, and an account created by a plugin payout can
+ * outlive the world its blocks were broken in. The union is the honest answer
+ * to "who has played here", which is the list the console completes <player>
+ * from and the list `prism players` prints.
+ *
+ * Cached, because it is a whole-table group-by and the console asks for it on
+ * every card render. Nobody joins the server often enough for two minutes of
+ * staleness to matter.
+ */
+const ROSTER_TTL_MS = 2 * 60 * 1000;
+let rosterCache = { at: 0, db: null, rows: null };
+
+export function knownPlayers(target) {
   const dirs = resolveDirs(target);
   if (!dirs) return { ok: false, error: 'not a Minecraft Java target, or its folder was not found' };
 
-  const balances = readBalances(dirs).filter((b) => IS_PLAYER.has(b.type));
+  if (rosterCache.rows && rosterCache.db === dirs.prismDb
+      && Date.now() - rosterCache.at < ROSTER_TTL_MS) {
+    return { ok: true, players: rosterCache.rows, cached: true };
+  }
+
+  const byKey = new Map(); // lowercased name -> row, so the two stores merge
+  const take = (name) => {
+    const key = String(name).replace(/^\./, '').toLowerCase();
+    if (!byKey.has(key)) {
+      byKey.set(key, { name, uuid: '', bedrock: false, balance: null, breaks: 0, first: null, last: null });
+    }
+    return byKey.get(key);
+  };
+
+  for (const b of readBalances(dirs).filter((b) => IS_PLAYER.has(b.type))) {
+    const row = take(b.name);
+    row.name = b.name; // the account spelling carries the Bedrock dot
+    row.uuid = b.uuid;
+    row.bedrock = String(b.uuid).startsWith(FLOODGATE_PREFIX);
+    row.balance = b.balance;
+  }
+
   let db;
-  const breaks = new Map();
   try {
     db = new DatabaseSync(dirs.prismDb, { readOnly: true });
-    for (const r of db.prepare(`
-      select p.player, count(*) n
-      from prism_activities a
-      join prism_players p on p.player_id = a.cause_player_id
-      join prism_actions ac on ac.action_id = a.action_id
-      where ac.action = 'block-break' group by p.player`).all()) {
-      breaks.set(r.player.toLowerCase(), r.n);
+    // One pass over the activity table rather than one query per player: this
+    // is the expensive read here, and asking it per name would turn a roster of
+    // a dozen children into a dozen full scans.
+    const rows = db.prepare(`
+      select p.player name, p.player_uuid uuid,
+             min(a.timestamp) first, max(a.timestamp) last,
+             sum(case when ac.action = 'block-break' then 1 else 0 end) breaks,
+             count(a.activity_id) events
+      from prism_players p
+      left join prism_activities a on a.cause_player_id = p.player_id
+      left join prism_actions ac on ac.action_id = a.action_id
+      group by p.player_id`).all();
+    for (const r of rows) {
+      // Prism records every cause it has ever seen, including the ones that are
+      // not people at all -- an "environment" row would otherwise be offered as
+      // a player to look up.
+      if (!r.uuid) continue;
+      const row = take(r.name);
+      if (!row.uuid) row.uuid = r.uuid;
+      row.bedrock = row.bedrock || String(r.uuid).startsWith(FLOODGATE_PREFIX);
+      row.breaks = Number(r.breaks) || 0;
+      row.events = Number(r.events) || 0;
+      row.first = r.first || null;
+      row.last = r.last || null;
     }
-  } catch { /* prism is optional for this view */ } finally {
+  } catch (err) {
+    // Prism is optional for this view: without it the roster is still every
+    // account TheNewEconomy knows, which is most of the answer.
+    if (!byKey.size) return { ok: false, error: `prism.db could not be read: ${err.message}` };
+  } finally {
     try { db?.close(); } catch { /* already gone */ }
   }
 
-  const L = ['=== players ' + '='.repeat(52),
-    `  ${pad('name', 20)}${'balance'.padStart(14)}${'blocks broken'.padStart(16)}`];
-  for (const b of balances) {
-    L.push(`  ${pad(b.name, 20)}${money(b.balance).padStart(14)}`
-      + `${num(breaks.get(b.name.toLowerCase()) || 0).padStart(16)}`);
+  const players = [...byKey.values()].sort((a, b) => (b.last || 0) - (a.last || 0)
+    || a.name.localeCompare(b.name));
+  rosterCache = { at: Date.now(), db: dirs.prismDb, rows: players };
+  return { ok: true, players };
+}
+
+/** Every player at a glance, for `prism players` and a bare `prism stats`. */
+export function playerLeaderboard(target) {
+  const roster = knownPlayers(target);
+  if (!roster.ok) return { ok: false, error: roster.error };
+
+  const L = ['=== players ' + '='.repeat(58),
+    `  ${pad('name', 18)}${'balance'.padStart(13)}${'broken'.padStart(11)}${'  last seen'}`];
+  for (const p of roster.players) {
+    L.push(`  ${pad(p.name + (p.bedrock ? ' *' : ''), 18)}`
+      + `${(p.balance == null ? '--' : money(p.balance)).padStart(13)}`
+      + `${num(p.breaks).padStart(11)}  ${when(p.last)}`);
   }
+  if (!roster.players.length) L.push('  (nobody on record yet)');
   L.push('');
+  L.push('  * = Bedrock account. Sorted by who played most recently.');
   L.push('  prism stats <player>   for one player in full');
   return { ok: true, body: L.join('\n') };
 }

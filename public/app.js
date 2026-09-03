@@ -166,6 +166,10 @@ function buildCard(target) {
   // Not deferred until the Commands panel is opened: the point of this is Tab
   // completion in the console, and nobody opens a reference panel first.
   primeCommandPicker(target.id);
+  // Same reasoning for the roster: it is what `prism stats <player>` completes
+  // from, and a suggestion list that only fills in after the first lookup is a
+  // suggestion list nobody notices.
+  if (JSON.stringify(caps.consoleArgs || {}).includes('@knownPlayers')) primeKnownPlayers(target.id);
 
   const sendRcon = async () => {
     const command = rconInput.value.trim();
@@ -185,13 +189,13 @@ function buildCard(target) {
     if (known?.danger && !confirm(`${command}\n\n${known.description}\n\nRun it?`)) return;
 
     const out = node.querySelector('.output');
-    out.textContent = `> ${command}\n…`;
+    writeConsole(out, `> ${command}\n…`);
     const res = await api(`/api/rcon/${target.id}`, {
       method: 'POST',
       body: JSON.stringify({ command }),
     });
-    out.textContent = `> ${command}\n${res.ok ? (res.body || '(no output)') : `ERROR: ${res.error}`}`;
-    out.scrollTop = out.scrollHeight;
+    writeConsole(out, `> ${command}\n${res.ok ? (res.body || '(no output)') : `ERROR: ${res.error}`}`);
+    out.scrollTop = 0; // a long report is read from its first line, not its last
     rconInput.value = '';
     rconInput.dispatchEvent(new Event('input')); // clears the description hint
   };
@@ -620,6 +624,143 @@ function selectPlaceholder(input) {
   else input.setSelectionRange(input.value.length, input.value.length);
 }
 
+// A console pane sized to what came back.
+//
+// Most replies are one line, and a 460px box of empty black under every "ok" is
+// wasted screen. But `prism stats` answers with sixty lines, and reading those
+// eight at a time through a 190px slot is the thing this exists to stop. So the
+// pane keeps its small default and doubles only when the reply has earned it --
+// measured on the rendered text, because "large response" is not something a
+// character count can tell you once wrapping is involved.
+//
+// scrollHeight is the full content height whatever the max-height is, so the
+// class has to come off before measuring, or a pane that once grew could never
+// shrink back down.
+const OUTPUT_BASE_PX = 190;
+function fitOutput(el) {
+  if (!el) return;
+  el.classList.remove('tall');
+  if (el.scrollHeight > OUTPUT_BASE_PX + 24) el.classList.add('tall');
+}
+
+// --- console colour ---------------------------------------------------------
+//
+// Plugins answer in colour and the console was showing the codes. A `prism
+// status` reply arrives as "§7》 Version: §x§4§f§f§f§d§34.4", which is not a
+// formatting nicety to lose -- it is six lines of punctuation soup wrapped
+// around the four characters anybody wanted. The same is true of the log tail,
+// which Paper writes with ANSI escapes.
+//
+// Both are rendered rather than stripped, because the colour is carrying real
+// meaning: Prism paints its errors red, and the log paints WARN and ERROR.
+//
+// THE PALETTE IS NOT MINECRAFT'S. Minecraft's is designed for a light-on-dark
+// game world where §0 is black and §8 is dark grey; on this pane those are
+// invisible, and §8 in particular is what half the plugins here prefix their
+// output with. Each entry is the same hue lifted to something readable on
+// --input, which is the whole point of doing this at all.
+const MC_COLORS = {
+  0: '#8892a0', 1: '#6b8cff', 2: '#4fbf6a', 3: '#3fbfbf',
+  4: '#e06c66', 5: '#b57ee0', 6: '#e0a33f', 7: '#b9c4d0',
+  8: '#8b98a8', 9: '#79b8ff', a: '#56d364', b: '#56d8d8',
+  c: '#ff7b72', d: '#e58af0', e: '#e3b341', f: '#eaf1f8',
+};
+
+// Paper's log, and anything else that writes ANSI. Bright and normal are given
+// the same value: the distinction is not worth two palettes, and half the
+// writers pick between them arbitrarily.
+const ANSI_COLORS = {
+  30: MC_COLORS[0], 31: MC_COLORS.c, 32: MC_COLORS.a, 33: MC_COLORS.e,
+  34: MC_COLORS[9], 35: MC_COLORS.d, 36: MC_COLORS.b, 37: MC_COLORS[7],
+  90: MC_COLORS[8], 91: MC_COLORS.c, 92: MC_COLORS.a, 93: MC_COLORS.e,
+  94: MC_COLORS[9], 95: MC_COLORS.d, 96: MC_COLORS.b, 97: MC_COLORS.f,
+};
+
+// A §x hex colour is chosen by the plugin author against a black chat box, so
+// it can land anywhere -- Prism's own banner runs through #00f2fa to #f3ffa8,
+// and the dark end of a gradient like that disappears here. Anything below the
+// floor is mixed toward white until it clears it, which keeps the hue and the
+// gradient while making every step of it readable.
+const MIN_LUMA = 0.42;
+function readable(hex) {
+  let [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  const luma = () => (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  for (let i = 0; i < 8 && luma() < MIN_LUMA; i += 1) {
+    [r, g, b] = [r, g, b].map((c) => Math.round(c + (255 - c) * 0.28));
+  }
+  return `#${[r, g, b].map((c) => c.toString(16).padStart(2, '0')).join('')}`;
+}
+
+// One run of text and how it is painted, as a <span> or as nothing when it is
+// plain. `state` is mutated by the parsers above it, so a colour set on one
+// line carries on to the next exactly as it does in game.
+function styledSpan(text, state) {
+  if (!text) return '';
+  const css = [];
+  if (state.color) css.push(`color:${state.color}`);
+  if (state.bold) css.push('font-weight:700');
+  if (state.italic) css.push('font-style:italic');
+  if (state.underline || state.strike) {
+    css.push(`text-decoration:${[state.underline && 'underline', state.strike && 'line-through'].filter(Boolean).join(' ')}`);
+  }
+  const body = escapeHtml(text);
+  return css.length ? `<span style="${css.join(';')}">${body}</span>` : body;
+}
+
+const SECTION = /§(x(?:§[0-9a-fA-F]){6}|[0-9a-fA-Fk-orK-OR])/g;
+const ANSI = /\u001b\[([0-9;]*)m/g;
+
+/** Server output, colour codes and all, as HTML for a <pre>. */
+function colorize(raw) {
+  const text = String(raw ?? '');
+  const state = { color: '', bold: false, italic: false, underline: false, strike: false };
+  const reset = () => Object.assign(state, { color: '', bold: false, italic: false, underline: false, strike: false });
+  let html = '';
+  let at = 0;
+
+  // One pass over whichever code comes next, so a line carrying both -- a log
+  // line quoting a plugin message -- is handled without two passes fighting.
+  const both = new RegExp(`${SECTION.source}|${ANSI.source}`, 'g');
+  for (let m = both.exec(text); m; m = both.exec(text)) {
+    html += styledSpan(text.slice(at, m.index), state);
+    at = m.index + m[0].length;
+
+    if (m[1] !== undefined) {
+      const code = m[1].toLowerCase();
+      if (code[0] === 'x') state.color = readable(`#${code.replace(/§/g, '').slice(1)}`);
+      else if (code === 'r') reset();
+      else if (code === 'l') state.bold = true;
+      else if (code === 'o') state.italic = true;
+      else if (code === 'n') state.underline = true;
+      else if (code === 'm') state.strike = true;
+      else if (code === 'k') { /* obfuscated: shown as the plain text under it */ }
+      else if (MC_COLORS[code]) { reset(); state.color = MC_COLORS[code]; }
+      continue;
+    }
+
+    // ANSI. Only the parts that carry meaning here; backgrounds and cursor
+    // moves are dropped rather than guessed at.
+    for (const part of (m[2] || '0').split(';')) {
+      const n = Number(part || 0);
+      if (n === 0) reset();
+      else if (n === 1) state.bold = true;
+      else if (n === 3) state.italic = true;
+      else if (n === 4) state.underline = true;
+      else if (n === 22) state.bold = false;
+      else if (ANSI_COLORS[n]) state.color = ANSI_COLORS[n];
+      else if (n === 39) state.color = '';
+    }
+  }
+  return html + styledSpan(text.slice(at), state);
+}
+
+/** Write server output into a <pre>, painted, and size the pane to it. */
+function writeConsole(el, text) {
+  if (!el) return;
+  el.innerHTML = colorize(text);
+  fitOutput(el);
+}
+
 function wireCommandPicker(node, input, commands, argValues, targetId) {
   const select = node.querySelector('.rcon-pick');
   const help = node.querySelector('.cmd-help');
@@ -729,6 +870,21 @@ function wireCommandPicker(node, input, commands, argValues, targetId) {
 // people who are actually there. Filled by render().
 const onlinePlayers = new Map();
 
+// Everyone who has ever played, per target, for the slots where "online now" is
+// the wrong list -- `prism stats` is asked about the child who logged off an
+// hour ago far more often than about the one standing in front of you. Fetched
+// once per card from /api/players, which reads it off disk; see
+// src/playerstats.js. Empty until it arrives, and the slot falls back to the
+// online list in the meantime rather than offering nothing.
+const knownPlayerLists = new Map();
+
+async function primeKnownPlayers(id) {
+  try {
+    const res = await api(`/api/players/${id}`);
+    if (res?.ok && res.players?.length) knownPlayerLists.set(id, res.players);
+  } catch { /* the online list still completes the slot */ }
+}
+
 // A slot is either a literal word or a <placeholder>, and a placeholder may
 // arrive wrapped in quotes because the game needs them -- Source's kick takes
 // "<name>" so that a name with a space in it survives the trip. The quotes
@@ -744,6 +900,20 @@ const isPlaceholder = (slot) => slotShape(slot) !== null;
 // are resolved here rather than in the profile because they are a different
 // answer every minute.
 function resolveOptions(spec, targetId) {
+  if (spec === '@knownPlayers') {
+    const roster = knownPlayerLists.get(targetId);
+    if (!roster?.length) return resolveOptions('@players', targetId);
+    const now = Date.now() / 1000;
+    const ago = (secs) => {
+      if (!secs) return 'never seen in the block log';
+      const days = Math.floor((now - secs) / 86400);
+      return days <= 0 ? 'played today' : days === 1 ? 'played yesterday' : `${days} days ago`;
+    };
+    return roster.map((p) => ({
+      value: p.name,
+      description: `${ago(p.last)}${p.bedrock ? ' · Bedrock' : ''}`,
+    }));
+  }
   if (spec === '@players' || spec === '@playerIds') {
     const players = onlinePlayers.get(targetId) || [];
     // Two lists because games disagree about what identifies a player: ARK and
@@ -1099,7 +1269,7 @@ async function runAction(target, node, btn) {
   const out = (capabilities.get(target.id)?.canConsole)
     ? node.querySelector('.output')
     : node.querySelector('.action-status');
-  if (out) out.textContent = `${action}…`;
+  if (out) { out.textContent = `${action}…`; fitOutput(out); }
 
   // A game server is asked to save and exit, and a large world can take a minute
   // or more to do it. A line that says "stop…" and then sits there for ninety
@@ -1144,6 +1314,7 @@ async function runAction(target, node, btn) {
       out.textContent = res.ok
         ? `${action}: ok${took}${res.forced ? ' (it had to be force-killed)' : ''}${detail}`
         : `${action} failed: ${res.error}`;
+      fitOutput(out);
     } else if (!res.ok && !updateOut) {
       alert(`${action} failed: ${res.error}`);
     }
@@ -1153,6 +1324,7 @@ async function runAction(target, node, btn) {
         : `FAILED: ${res.error}${res.restored === true ? '\nService was restarted on the previous version.'
           : res.restored === false ? '\nThe service is still DOWN.' : ''}`;
       updateOut.textContent = [head, res.output].filter(Boolean).join('\n\n');
+      fitOutput(updateOut);
       updateOut.scrollTop = updateOut.scrollHeight;
     }
     if (action === 'broadcast') node.querySelector('.broadcast-msg').value = '';
@@ -2219,7 +2391,7 @@ async function loadHistory(id, node) {
 async function loadLog(id, node) {
   const res = await api(`/api/logs/${id}?lines=200`);
   const pre = node.querySelector('.logout');
-  pre.textContent = res.lines?.length ? res.lines.join('\n') : '(no log found)';
+  writeConsole(pre, res.lines?.length ? res.lines.join('\n') : '(no log found)');
   pre.scrollTop = pre.scrollHeight;
 }
 

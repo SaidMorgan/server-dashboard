@@ -425,6 +425,40 @@ unbanned — and it must not become an entry.
 Pardon is one click; it's the safe direction, and a mistake is undone by banning
 again. Ban asks first.
 
+### Player reports (Minecraft Java)
+
+Two commands the dashboard answers itself rather than forwarding to the server,
+because no plugin in the game can see all the places the answer lives:
+
+```
+prism players            everyone who has ever played
+prism stats <player>     one of them in full
+```
+
+`prism players` is the roster: name, balance, blocks broken and last seen, most
+recent first. It is the union of everyone Prism has
+recorded touching a block and everyone TheNewEconomy holds an account for —
+neither list is a superset of the other. The console completes `prism stats`
+from it, so looking up the child who logged off an hour ago takes no typing.
+
+`prism stats <player>` joins four stores into one report: blocks broken and
+placed with an hourly rate (Prism), balance and where the money came from
+(TheNewEconomy), what they have bought and sold (UltimateShop), and whether the
+account came in through Floodgate.
+
+The last section is the reason it exists. Money and shop volume alone cannot
+tell grinding from duplicating — both look like "sold twenty thousand logs".
+Prism can: a duplicated item has no block-break behind it and a mined one has
+exactly one, so the report puts *sold* and *mined* in adjacent columns and flags
+the rows where selling has outrun any source for it. A flag is a prompt to run
+`prism lookup`, not a verdict — Fortune, gifts and event prizes are all real.
+
+Everything is read-only, opens the live databases read-only, and needs nothing
+installed: it is skipped silently on a server that has none of those plugins.
+Both names are the dashboard's own — Prism 4 has no `stats` or `players`
+subcommand of its own, and everything else you type after `prism` goes straight
+through to the plugin.
+
 ### Schedules
 
 ```jsonc
@@ -630,13 +664,13 @@ sc query ServerDashboard
 | Warn & restart | broadcasts at 15/10/5/1 min, then restarts. Cancellable |
 | Restart when empty | waits for the last player to leave, then restarts; gives up rather than restarting on top of players |
 | Broadcast | send a message to everyone in-game |
-| Console | raw RCON command box, with a menu of the commands this game knows and word-by-word suggestions as you type (pick `gamerule`, get the rules; pick a rule, get its values) |
+| Console | raw RCON command box, with a menu of the commands this game knows and word-by-word suggestions as you type (pick `gamerule`, get the rules; pick a rule, get its values). Replies are shown in colour, and the pane grows to about double height for a long one |
 | Chart | 3h of player count; red bands are downtime |
 | Mods | what is installed: version, author, size, and a flag when one needs a decision |
 | Schedules | recurring jobs for this server |
 | Backups | run, download, restore |
 | Bans & moderation | who is banned, with one-click pardon; recent kicks, bans and pardons (Minecraft Java) |
-| Log tail | last 200 lines |
+| Log tail | last 200 lines, with the server's own colours rendered rather than shown as escape codes |
 
 Controls that a game can't support are hidden rather than shown and failing — a
 Valheim card has no broadcast box, because Valheim has no way to send one. A game

@@ -91,11 +91,16 @@ export class Actions {
     const head = parts[0]?.toLowerCase();
     const sub = parts[1]?.toLowerCase();
 
-    const isStats = (head === 'prism' || head === 'pr') && sub === 'stats';
+    const isPrism = head === 'prism' || head === 'pr';
+    const isStats = isPrism && sub === 'stats';
+    // The roster under its own name, because "prism stats" with no name giving
+    // a different report than "prism stats <someone>" is not something anyone
+    // discovers by reading the command list.
+    const isRoster = isPrism && (sub === 'players' || sub === 'who');
     const isBare = head === 'stats' || head === 'playerstats';
-    if (!isStats && !isBare) return null;
+    if (!isStats && !isRoster && !isBare) return null;
 
-    const who = (isStats ? parts.slice(2) : parts.slice(1)).join(' ').trim();
+    const who = (isStats ? parts.slice(2) : isBare ? parts.slice(1) : []).join(' ').trim();
     try {
       return who ? playerStats(t, who) : playerLeaderboard(t);
     } catch (err) {
@@ -113,10 +118,12 @@ export class Actions {
     // accounts and UltimateShop's per-player counts, and no plugin in the game
     // can see all three. See src/playerstats.js.
     //
-    // "prism stats" is spelled to sit where an admin would look for it. Prism
-    // registers its own commands through Brigadier and has no `stats`
-    // subcommand, so nothing real is being shadowed -- and anything that is not
-    // exactly `stats` falls straight through to the genuine /prism below.
+    // "prism stats" and "prism players" are spelled to sit where an admin would
+    // look for them. Prism registers its own commands through Brigadier and has
+    // neither subcommand (it has about, lookup, near, page, preview, purge,
+    // report, restore, rollback, status, teleport, undo, vault and wand), so
+    // nothing real is being shadowed -- and anything else, `prism status`
+    // included, falls straight through to the genuine /prism below.
     const local = this.localCommand(t, command);
     if (local) return local;
 

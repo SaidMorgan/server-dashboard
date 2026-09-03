@@ -19,6 +19,7 @@ import { inventory as modInventory, modSource } from './src/mods.js';
 import { CommandIndex, buildCommandList } from './src/commands.js';
 import { closeAll } from './src/rcon.js';
 import * as moderation from './src/moderation.js';
+import { knownPlayers } from './src/playerstats.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(here, 'public');
@@ -243,6 +244,20 @@ app.get('/api/commands/:id', async (req, res) => {
   if (payload.live) payload.live.stale = commandIndex.isStale(t.id);
   payload.pending = !live;
   return res.json(payload);
+});
+
+// Everyone who has ever played, not only who is online -- the console completes
+// `prism stats <player>` from this, and the whole point of that command is to
+// look up somebody who is not here. Read from Prism and TheNewEconomy on the
+// server side because both are files on disk this browser cannot see.
+app.get('/api/players/:id', (req, res) => {
+  const t = config.targets.find((x) => x.id === req.params.id);
+  if (!t) return res.status(404).json({ error: 'unknown target' });
+  try {
+    return res.json(knownPlayers(t));
+  } catch (err) {
+    return res.json({ ok: false, error: String(err?.message || err) });
+  }
 });
 
 app.get('/api/history/:id', (req, res) => {
