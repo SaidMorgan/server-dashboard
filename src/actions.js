@@ -3,6 +3,7 @@
 import { rconCommand } from './rcon.js';
 import { getProfile } from './games/index.js';
 import { launchDetached, killProcess, controlService, runCommands, getProcessStats } from './win.js';
+import { playerStats, playerLeaderboard } from './playerstats.js';
 
 // --- tunables ---------------------------------------------------------------
 // Sensible defaults for the servers this was built against. Change them here;
@@ -78,10 +79,46 @@ export class Actions {
     return p;
   }
 
+  /**
+   * Commands the dashboard answers itself, or null to pass through to the game.
+   *
+   * Deliberately a tiny, explicit list. Every string matched here is a string
+   * that no longer reaches the server, so the matching has to be narrow enough
+   * that nobody loses a real command they meant to run.
+   */
+  localCommand(t, command) {
+    const parts = String(command).trim().split(/\s+/);
+    const head = parts[0]?.toLowerCase();
+    const sub = parts[1]?.toLowerCase();
+
+    const isStats = (head === 'prism' || head === 'pr') && sub === 'stats';
+    const isBare = head === 'stats' || head === 'playerstats';
+    if (!isStats && !isBare) return null;
+
+    const who = (isStats ? parts.slice(2) : parts.slice(1)).join(' ').trim();
+    try {
+      return who ? playerStats(t, who) : playerLeaderboard(t);
+    } catch (err) {
+      return { ok: false, error: `stats failed: ${err.message}` };
+    }
+  }
+
   async rcon(id, command) {
     const t = this.target(id);
     if (t.kind !== 'game') return { ok: false, error: 'not a game server' };
     const profile = getProfile(t.game);
+
+    // Answered here rather than forwarded to the server, because the server
+    // cannot answer it: the report joins Prism's database to TheNewEconomy's
+    // accounts and UltimateShop's per-player counts, and no plugin in the game
+    // can see all three. See src/playerstats.js.
+    //
+    // "prism stats" is spelled to sit where an admin would look for it. Prism
+    // registers its own commands through Brigadier and has no `stats`
+    // subcommand, so nothing real is being shadowed -- and anything that is not
+    // exactly `stats` falls straight through to the genuine /prism below.
+    const local = this.localCommand(t, command);
+    if (local) return local;
 
     if (profile.transport === 'none') {
       return { ok: false, error: `${profile.label} has no remote command interface` };
