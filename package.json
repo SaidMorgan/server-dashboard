@@ -3,13 +3,24 @@
   "version": "1.0.0",
   "type": "module",
   "description": "Web control panel for game servers and Windows services on one machine",
-  "keywords": ["game-server", "ark", "palworld", "minecraft", "rcon", "dashboard", "windows"],
+  "keywords": [
+    "game-server",
+    "ark",
+    "palworld",
+    "minecraft",
+    "rcon",
+    "dashboard",
+    "windows"
+  ],
   "license": "MIT",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
   },
-  "os": ["win32"],
+  "os": [
+    "win32"
+  ],
   "dependencies": {
     "express": "^4.21.2"
   },

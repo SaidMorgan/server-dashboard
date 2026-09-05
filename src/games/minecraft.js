@@ -81,7 +81,38 @@ export default {
     { command: 'prism restore <prismQuery>', description: 'Re-apply everything the query matches, undoing a rollback', danger: true },
     { command: 'prism undo', description: 'Reverse your own last rollback or restore', danger: true },
     { command: 'prism purge <prismQuery>', description: 'Delete matching rows from the block log permanently — this is not a rollback', danger: true },
+
+    // DuelArena is the other shape the usage parser cannot help with, for the
+    // opposite reason to Prism's. It declares one command with fourteen words
+    // under it in a single bracket group, which is more alternatives than the
+    // parser will expand, so the whole line is dropped and Tab has nothing
+    // after "arena". Its second level -- `tp <room>`, `t start`, `raid arm` --
+    // was never in that line to begin with. Both are spelled out here.
+    //
+    // Only the words the console can actually run, plus the two worth knowing
+    // exist. Everything else on /arena needs a body standing in the world.
+    // The aliases live in commandAliases below, so /duelarena and /soloarena
+    // complete the same list without a second copy of it.
+    { command: 'arena status', description: 'Who is queued, what is running, how many hold a prize — the first thing to check when the arena is stuck' },
+    { command: 'arena help', description: 'The player-facing command list' },
+    { command: 'arena reload', description: 'Re-read config.yml and rebuild the stadium, chambers and boss rooms. Safe mid-session, NOT safe mid-fight — it puts blocks back where somebody is standing, so check status first', danger: true },
+    { command: 'arena host', description: 'Open tournament sign-up' },
+    { command: 'arena t <arenaTournament>', description: 'Run the tournament: open sign-up, close it early, or call it off' },
+    { command: 'arena give <player>', description: 'A fresh beacon and all the books, ignoring what they had; needs three free slots' },
+    { command: 'arena refresh <arenaRefresh>', description: 'Rewrite old prizes and books to their current version' },
+    { command: 'arena refresh <player>', description: 'Rewrite the prizes and books one player is holding to their current version' },
+    { command: 'arena raid arm', description: 'Force the next challenge anybody starts to become the village raid — the only way to make one happen on purpose' },
+    { command: 'arena tp <arenaRoom>', description: 'Straight into a room without queueing — in game only' },
+    { command: 'arena book', description: 'The Arena Maintenance book, to yourself — in game only' },
   ],
+
+  // The same command under six other spellings, so the console completes
+  // /duelarena and /soloarena exactly as it completes /arena. Aliases rather
+  // than repeated rows: half the point of the list above is that there is one
+  // of it to keep right.
+  commandAliases: {
+    arena: ['duel', 'soloarena', 'solo', 'caves', 'duelarena', 'da'],
+  },
 
   // Options for the <placeholders> above, so the console can suggest the next
   // word rather than leaving a name to be remembered. An option's own `values`
@@ -119,6 +150,22 @@ export default {
     // remember, not only whoever happens to be online, because looking up a
     // player who is not here is the entire point of the command.
     knownPlayer: '@knownPlayers',
+    arenaTournament: [
+      { value: 'host', description: 'Open sign-up so anyone can enter' },
+      { value: 'start', description: 'Close sign-up early and run the bracket' },
+      { value: 'cancel', description: 'Call the whole thing off' },
+    ],
+    arenaRefresh: [
+      { value: 'all', description: 'Everyone online' },
+      { value: 'chests', description: 'Containers in loaded chunks — the bases of whoever is on' },
+    ],
+    arenaRoom: [
+      { value: 'solo', description: 'A wave chamber' },
+      { value: 'dragon', description: 'The dragon coliseum' },
+      { value: 'warden', description: 'The buried city' },
+      { value: 'duel', description: 'The pit' },
+      { value: 'raid', description: 'The village, empty — to look at the build' },
+    ],
     prismWand: [
       { value: 'inspect', description: 'Right-click a block to see its history' },
       { value: 'rollback', description: 'Right-click to undo changes at that block' },

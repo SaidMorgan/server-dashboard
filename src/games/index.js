@@ -59,6 +59,29 @@ function normalizeOptions(list, depth = 0) {
   return rows.length ? rows : null;
 }
 
+// alias -> real command word, lowercased. Cosmetic like the rest of the console
+// hints, so anything malformed costs the aliases and not the profile.
+function flattenAliases(spec, id, where) {
+  const out = {};
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+    if (spec) console.error(`[games] "${id}"${where}: commandAliases must be an object — ignoring it`);
+    return out;
+  }
+  for (const [real, aliases] of Object.entries(spec)) {
+    if (!Array.isArray(aliases)) {
+      console.error(`[games] "${id}"${where}: commandAliases.${real} must be an array — ignoring it`);
+      continue;
+    }
+    for (const alias of aliases) {
+      // An alias of itself is a loop waiting to happen and buys nothing.
+      if (typeof alias !== 'string' || !alias.trim()) continue;
+      if (alias.trim().toLowerCase() === real.toLowerCase()) continue;
+      out[alias.trim().toLowerCase()] = real.toLowerCase();
+    }
+  }
+  return out;
+}
+
 function normalizeArgValues(argValues, id, where) {
   if (!argValues) return {};
   if (typeof argValues !== 'object' || Array.isArray(argValues)) {
@@ -95,6 +118,7 @@ function register(profile, origin) {
     commands: null,
     consoleCommands: [],
     argValues: {},
+    commandAliases: {},
     rest: null,
     restVerbs: null,
     query: null,
@@ -138,6 +162,13 @@ function register(profile, origin) {
       description: typeof c.description === 'string' ? c.description : '',
       danger: Boolean(c.danger),
     }));
+
+  // Other spellings of a command, written the way a plugin's own plugin.yml
+  // writes them -- { arena: ['duelarena', 'da'] } -- and flattened here into
+  // the lookup the browser wants: alias -> the real command word. Doing it
+  // once on the server keeps the profile readable and the console's inner
+  // loop a single object lookup.
+  normalized.commandAliases = flattenAliases(normalized.commandAliases, normalized.id, where);
 
   // Suggestion options for the <placeholders> in those commands. Cosmetic in
   // the same way, and normalized here so the browser can trust the shape: a

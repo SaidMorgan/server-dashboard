@@ -15,6 +15,12 @@
 // Administration happens in-game instead. A player whose Steam ID is in
 // AdminPassword's ini section gets the server console with `\` — that is the
 // only channel there is.
+//
+// What it cannot be *asked*, it can still be read from what it writes down: the
+// player names come out of its log (src/logplayers.js), the prospect and the
+// save's age out of the save file (src/savegame.js), and whether it is really in
+// the server browser out of Steam itself (src/steamlisting.js).
+import { sliceJsonObject } from '../savegame.js';
 
 export default {
   id: 'icarus',
@@ -24,7 +30,8 @@ export default {
   // A2S_INFO gives the count; A2S_PLAYER does not give names. Icarus answers it
   // with the right number of entries and an empty string in every name field,
   // so asking costs a second UDP round trip every poll and returns nothing the
-  // count did not already say. The card shows "N online" without a list.
+  // count did not already say. The names come out of the log instead -- see
+  // playersFromLog below -- and this stays the authority on the count.
   query: {
     protocol: 'a2s',
     names: false,
@@ -45,6 +52,80 @@ export default {
   // Not to be confused with the two "Version: 4.27.x" lines just above it in
   // the same file — those are the Unreal Engine build, not the game.
   versionLog: { pattern: /====>\s*Version:\s*([\d.]+)/ },
+
+  // Who is on, from the same log. A2S_PLAYER blanks every name, so this is the
+  // only place the server ever says one out loud:
+  //
+  //   LogConnectedPlayers: Display: AddConnectedPlayer - UserId: 7656... | PlayerName: Someone
+  //   LogConnectedPlayers: Display: RemoveConnectedPlayer - UserId: 7656...
+  //
+  // Only the Add/Remove pair is matched, deliberately. The same category prints
+  // ServerTryCompletePlayerInitialisation and FinaliseConnectedPlayerInitialisation
+  // for the same join, sometimes several times, and counting those would put a
+  // player on the card twice. These two are the ones that bracket a session.
+  //
+  // Icarus rotates its log on every start, so the reconstructed roster covers
+  // exactly the current run and a restart forgets everyone -- which is correct,
+  // since a restart disconnects them. See src/logplayers.js.
+  playersFromLog: {
+    join: /AddConnectedPlayer - UserId:\s*(\d+)\s*\|\s*PlayerName:\s*(.*)$/,
+    leave: /RemoveConnectedPlayer - UserId:\s*(\d+)/,
+  },
+
+  // The prospect, read out of the save file. Nothing else on the box says which
+  // world is loaded, how far into it the server is, or on what difficulty --
+  // there is no query field for it and no console to ask -- but the save's
+  // header says all of it in plain JSON before the actor blob starts.
+  //
+  // The mtime is the more important half. Stop and Restart here are a kill made
+  // safe only by SaveGameOnExit, and this file's age is the only evidence that
+  // pressing Restart will not cost the evening. See src/savegame.js.
+  saveInfo: {
+    dir: 'Icarus/Saved/PlayerData/DedicatedServer/Prospects',
+    // The game keeps ten rolling copies (`Olympus.json.backup_7`) beside the
+    // live file. Matching only the bare .json keeps the newest-file rule
+    // pointing at the one the server is actually writing.
+    match: /^[^.]+\.json$/i,
+    parse(head) {
+      const info = sliceJsonObject(head, 'ProspectInfo');
+      if (!info) return null;
+      const members = Array.isArray(info.AssociatedMembers) ? info.AssociatedMembers : [];
+      return {
+        prospect: info.ProspectID || null,
+        // "Outpost006_Olympus" -- the table row key, which carries the map and
+        // the mission slot. The trailing word is the part a player would name.
+        mapKey: info.ProspectDTKey || null,
+        map: (info.ProspectDTKey || '').split('_').pop() || null,
+        difficulty: info.Difficulty || null,
+        state: info.ProspectState || null,
+        // Seconds of in-prospect time, which is not the same as server uptime:
+        // it does not advance while the prospect is unloaded, so it is the real
+        // "how far into this world are we".
+        elapsedSeconds: typeof info.ElapsedTime === 'number' ? info.ElapsedTime : null,
+        hardcore: Boolean(info.NoRespawns),
+        insurance: Boolean(info.Insurance),
+        members: members.map((m) => ({
+          name: m.CharacterName || m.AccountName || null,
+          id: m.UserID || null,
+          playing: Boolean(m.IsCurrentlyPlaying),
+        })),
+      };
+    },
+  },
+
+  // Proof that the server is in the Steam browser, which is the one thing the
+  // logHealth check below cannot give. That check reads an error line and
+  // infers the consequence; this asks Steam what it is currently advertising.
+  //
+  // The inference has been wrong in practice -- a run that logged
+  // `bWasSuccessful: 0` has since been found perfectly joinable -- which is why
+  // the restart in src/monitor.js hangs off this and not off the log.
+  //
+  // appId is the id the server advertises itself under, which is the GAME
+  // (1149460, and it is what `[AppId: ...]` in the log shows), not the
+  // dedicated server tool in `defaults.steamAppId` (2089300). Filtering by the
+  // wrong one returns an empty list for a perfectly healthy server.
+  listing: { appId: 1149460 },
 
   defaults: {
     // Both UDP. The query port is a real Steam game server query port, not

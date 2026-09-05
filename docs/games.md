@@ -654,6 +654,126 @@ Note that a server started by the dashboard service runs as **LocalSystem**. You
 cannot `taskkill` it from an ordinary shell — the dashboard can, because it is
 that service, so restart it from the card rather than the command line.
 
+### ...but `bWasSuccessful: 0` is not proof it is unreachable either
+
+The `logHealth` check above reads an error line and *infers* the consequence,
+and the inference has been wrong in practice: this server has logged
+`bWasSuccessful: 0` and then been found perfectly joinable. Registration is a
+race with retries behind it, and the log records the lost round, not the match.
+
+So treat that alert as "go and look", never as a verdict — and in particular
+never wire an automatic restart to it. What the restart hangs off instead is the
+positive check below, because the two failure reports disagree often enough that
+acting on the pessimistic one would reboot working servers.
+
+### Verifying it is really in the browser
+
+Nothing measured on this side of the connection can answer this. The process is
+up either way, and — the part that surprises people — **the Steam query answers
+either way too**. The evidence is in this install's own history: across the run
+that logged `bWasSuccessful: 0` at 20:45, the dashboard's A2S query to 27016
+answered every ten seconds for the following seven hours, 2716 samples, with a
+valid player count throughout. The query is served beside the server; the
+listing lives on Valve's side. Only Valve can be asked.
+
+The UDP master servers that used to answer this (`hl2master.steampowered.com`
+and its siblings) are **gone** — the hostnames no longer resolve — so the
+remaining route is the Steam Web API:
+
+```
+GET https://api.steampowered.com/IGameServersService/GetServerList/v1/
+    ?key=<key>&filter=\appid\1149460\gameaddr\<your public IP>
+```
+
+That needs a free key from <https://steamcommunity.com/dev/apikey>, put in
+`.env` as `STEAM_WEB_API_KEY` and referenced from `config.json` as
+`"steamWebApiKey": "${STEAM_WEB_API_KEY:-}"`. Without a key the tile reads
+**unverified** and nothing is ever restarted — not knowing is its own state, and
+it is deliberately not drawn as a warning.
+
+Two details that will otherwise cost an afternoon:
+
+- **The app id is the game's, not the dedicated server's.** Icarus advertises
+  itself under `1149460` (which is what `[AppId: ...]` in its log shows), while
+  the SteamCMD tool in `defaults.steamAppId` is `2089300`. Filter by the second
+  and a perfectly healthy server comes back as unlisted.
+- **`gameaddr` filters by IP only**, so every server on this box comes back in
+  the same reply — Palworld included. The match on `gameport` is what picks ours
+  out of the list.
+
+### Restarting a server that has fallen out of the browser
+
+`target.listing.autoRestart` turns the check above into a recovery. It is the
+only thing in the dashboard that will restart a server which is running
+perfectly well, so the whole design is about not doing that by mistake:
+
+| Guard | Why |
+| --- | --- |
+| Asks every `everySeconds` (300) | One HTTPS call to Valve, nowhere near the 10s poll |
+| `afterSeconds` (180) grace from process start | Registration lands 15–60s in; asking earlier is meaningless |
+| `minChecks` (3) **consecutive** misses | A single miss has been wrong before — see the section above |
+| ...spanning `minSpanSeconds` (600) | Three checks bunched into a minute prove nothing |
+| A check that *failed* is never a miss | No key, rate limit, dropped uplink: not knowing ≠ not listed |
+| Any player online cancels it | They are proof it is reachable; restarting would evict the evidence |
+| The count must be a confirmed **zero** | Unknown is not empty, and this game cannot warn anyone |
+| `maxRestartsPerHour` (2), then it stops | A restart does not always fix this. Two failures mean the cause is elsewhere, and looping would only add downtime |
+
+The give-up is the important one. The underlying cause is usually
+`ResumeProspect=True` losing the race described above, which a restart fixes
+only by winning a coin toss — so after two attempts it stops, says exactly that,
+and leaves it for a human. A confirmed listing resets the budget, so a server
+that is fine for a week starts each new fault with a full set of tries.
+
+`minChecks` below 2 is refused by the config validator: acting on a single
+answer is precisely the failure this exists to avoid.
+
+### Who is online, without a player list
+
+A2S_PLAYER is useless here — Icarus answers it with the right number of entries
+and an empty string in every name field — but the log says it plainly:
+
+```
+LogConnectedPlayers: Display: AddConnectedPlayer - UserId: 7656…  | PlayerName: Someone
+LogConnectedPlayers: Display: RemoveConnectedPlayer - UserId: 7656…
+```
+
+Replaying that pair gives the roster (`playersFromLog` in the profile,
+src/logplayers.js). Only those two lines are matched: the same category also
+prints `ServerTryCompletePlayerInitialisation` and
+`FinaliseConnectedPlayerInitialisation` for the same join, sometimes repeatedly,
+and counting those puts a player on the card twice.
+
+The log is read incrementally — one offset per run, only the appended bytes on
+each poll — because these files reach several MB on a busy night and the loop
+runs every ten seconds. Icarus rotates its log at every start, so the roster
+covers exactly the current run and a restart correctly forgets everyone.
+
+**The query keeps the last word on the count.** A log is a narrative and can
+miss a line; a dropped connection whose `Remove` never got written would
+otherwise leave a ghost on the card until the next restart, in the exact place
+an admin looks to decide whether rebooting is safe. So when the two disagree the
+number wins, the names are still shown, and the panel says it is reading from
+the log.
+
+### The prospect, and how old the save is
+
+The prospect file opens with a plain `ProspectInfo` object before its actor
+blob, and it is the only place any of this is written down: which prospect, the
+map, the difficulty, `ElapsedTime` (in-prospect seconds, which is not uptime —
+it does not advance while the prospect is unloaded), the hardcore and insurance
+flags, and the member roster with an `IsCurrentlyPlaying` flag each.
+
+Only the first 16 KB is read and only the header object is parsed out of it, by
+brace matching rather than `JSON.parse` — the file is ~220 KB and nearly all of
+it is one base64 string. The parse is cached against mtime and size, so an idle
+server costs a `stat`.
+
+**The mtime is the half that changes a decision.** Stop and Restart here are a
+process kill, safe only because of `SaveGameOnExit=True`, and this file's age is
+the only evidence an admin has of what pressing Restart would cost. The card
+shows it as **Saved**, and turns it amber past an hour. Note that an idle server
+legitimately writes nothing, so an old save on an empty server is not a fault.
+
 ### The self-shutdown timers fight the watchdog
 
 `ServerSettings.ini` is **not generated on first run**; you write it yourself at
@@ -739,6 +859,14 @@ race for its port.
 Where the console and broadcast controls would have been, the card prints the
 profile's `noRemoteNote` instead of leaving a gap, because a card missing half of
 another card's controls reads as broken rather than as a different game.
+
+What `transport: none` does **not** cost is information. Nothing here can be
+asked a question, but it writes plenty down, and the card reads all of it: the
+player names out of its log, the prospect and the save's age out of the save
+file, the build out of the log banner, the player count off the Steam query, and
+whether it is advertised at all out of Steam itself. The four sections above
+cover each. The result is a card with more on it than some of the games that do
+have RCON — the missing pieces are the two controls, not the picture.
 
 ### Mods
 
@@ -841,6 +969,41 @@ export default {
   // caching a real answer is what makes that resolve on the following poll.
   versionCommand: 'version',
   parseVersion: (body) => (body.match(/version\s+(\S+)/i) || [])[1] || null,
+
+  // Optional: reconstruct the player list from the server's own log, for a game
+  // that names players nowhere else. Only these two lines are replayed, in
+  // order, so the patterns must match the *bracketing* pair for a session and
+  // nothing else the game prints per join. The count from `query` above stays
+  // authoritative; disagreement is shown rather than hidden. See icarus.js and
+  // src/logplayers.js.
+  playersFromLog: {
+    join: /PlayerConnected: (\d+) name: (.*)$/,
+    leave: /PlayerDisconnected: (\d+)/,
+    idGroup: 1, nameGroup: 2,            // defaults, both optional
+  },
+
+  // Optional: read the world's own header, and — as much to the point — when it
+  // was last written, which is the only evidence of what a Stop would cost on a
+  // game with no save command. `dir` is resolved against the target's
+  // steamInstallDir (or saveDir); the newest matching file wins; `parse` is
+  // handed the first `headBytes` (16 KB) of it and returns whatever the card
+  // should show. Cached against mtime and size. See icarus.js, and
+  // sliceJsonObject() in src/savegame.js for pulling one object out of a huge
+  // JSON save without parsing the rest.
+  saveInfo: {
+    dir: 'Saved/Worlds', match: /^[^.]+\.json$/i, headBytes: 16384,
+    parse: (head) => ({ prospect: '…', difficulty: '…', elapsedSeconds: 0 }),
+  },
+
+  // Optional: ask Steam whether this server is actually in the server browser —
+  // a question no local check can answer, since a server can answer its own
+  // query port for hours while being advertised nowhere. Needs a
+  // steamWebApiKey in config.json; without one the tile reads "unverified" and
+  // nothing acts. `appId` is the id the SERVER ADVERTISES ITSELF under, which
+  // is the game's, not the dedicated server tool's. Per-target
+  // `listing.autoRestart` turns it into a recovery — read the guard table in
+  // the Icarus section before enabling that anywhere. See src/steamlisting.js.
+  listing: { appId: 1149460 },
 
   commands: {
     list: 'players',

@@ -6,6 +6,9 @@ import path from 'node:path';
 import { rconCommand, getClient } from './rcon.js';
 import { queryInfo, queryPlayers } from './a2s.js';
 import { queryInfo as raknetInfo } from './raknet.js';
+import { LogRoster, reconcile } from './logplayers.js';
+import { SaveReader } from './savegame.js';
+import { checkListed, judgeListing } from './steamlisting.js';
 import { getProfile } from './games/index.js';
 import { getProcessStats, getServiceState, getServiceProcess, checkHealth, toast } from './win.js';
 
@@ -25,6 +28,25 @@ const HISTORY_DEFAULT_MINUTES = 180;
 const WATCHDOG_WAIT_SECONDS = 60;
 const RESTART_WINDOW_MS = 3600_000;
 
+// --- listing watchdog -------------------------------------------------------
+//
+// Defaults for the "is it actually in the Steam browser" check. These are the
+// numbers that decide whether a healthy server gets rebooted for nothing, so
+// they are conservative on purpose and every one of them is per-target
+// overridable (target.listing in config.json).
+//
+// The check costs one HTTPS request to Valve, so it is nowhere near the 10s poll
+// loop — five minutes apart, three misses in a row, and never before the run has
+// had time to register. That is 10 minutes of consistent evidence before
+// anything is touched.
+const LISTING_DEFAULTS = {
+  everySeconds: 300,     // how often to ask Steam
+  afterSeconds: 180,     // grace from process start; registration lands ~15-60s in
+  minChecks: 3,          // consecutive misses before acting
+  minSpanSeconds: 600,   // ...and they must span at least this long
+  maxRestartsPerHour: 2, // then stop, and say so, rather than loop
+};
+
 export class Monitor {
   constructor(config, dataDir) {
     this.config = config;
@@ -41,6 +63,10 @@ export class Monitor {
     // cannot both be constructor arguments of each other.
     this.notifier = null;
     this.actions = null;
+    // The long-term utilisation rollup (src/usage.js). Fed from pollOnce rather
+    // than from the onPoll hook, because onPoll only fires from start() and a
+    // poll that skipped the rollup is a permanent hole in the weekly averages.
+    this.usage = null;
     this.watchdogTimers = new Map(); // id -> pending restart timer
     this.logHealth = new Map();      // id -> {startedAt, verdict} per server run
     // id -> {startedAt, version}. Keyed on the process start time so it is
@@ -50,6 +76,15 @@ export class Monitor {
     // re-learn a string that cannot have moved.
     this.versions = new Map();
     this.restartLog = new Map();     // id -> [timestamps] for flap protection
+    // id -> LogRoster / SaveReader. Both hold a little state between polls (a
+    // read offset, a parse cache) so that reading a player list or a save
+    // header does not mean re-reading megabytes every ten seconds.
+    this.rosters = new Map();
+    this.saveReaders = new Map();
+    // id -> the listing check's running verdict and strike count. See
+    // #pollListing; this is the only state that can restart a server that is
+    // still running, so it is deliberately not folded in with anything else.
+    this.listing = new Map();
 
     fs.mkdirSync(dataDir, { recursive: true });
     this.historyFile = path.join(dataDir, 'history.json');
@@ -79,9 +114,10 @@ export class Monitor {
     fs.writeFile(this.alertsFile, JSON.stringify(this.alerts.slice(0, this.alertLimit)), () => {});
   }
 
-  attach({ actions, notifier }) {
+  attach({ actions, notifier, usage }) {
     this.actions = actions ?? this.actions;
     this.notifier = notifier ?? this.notifier;
+    this.usage = usage ?? this.usage;
   }
 
   // The single funnel every event in the dashboard passes through, which is why
@@ -158,6 +194,7 @@ export class Monitor {
       });
       this.history.set(snap.id, rows);
     }
+    this.usage?.record(snapshots, now);
     this.#persist();
     return snapshots;
   }
@@ -241,6 +278,21 @@ export class Monitor {
     // since transport:'none' returns a few lines further down.
     if (running && !snap.version && profile.versionLog && target.logFile) {
       this.#versionFromLog(target, profile.versionLog, snap);
+    }
+
+    // Three more readings that need no control channel, in increasing order of
+    // how far they reach: the server's own log, the save file it writes, and
+    // Steam's opinion of whether the thing is advertised at all. Like the
+    // version above, these sit before the transport:'none' return because a
+    // game with no transport is exactly the game that needs them.
+    if (profile.playersFromLog && target.logFile) {
+      this.#playersFromLog(target, profile, snap, running);
+    }
+    if (profile.saveInfo && (target.steamInstallDir || target.saveDir)) {
+      snap.save = this.#readSave(target, profile);
+    }
+    if (profile.listing && target.listing?.enabled !== false) {
+      this.#pollListing(target, profile, snap, running);
     }
 
     // Games with no control interface at all (Valheim, "process"): there is
@@ -333,6 +385,156 @@ export class Monitor {
       snap.version = m[spec.group ?? 1];
       this.versions.set(target.id, { startedAt: snap.startedAt, version: snap.version });
     } catch { /* an unreadable log costs a label, nothing else */ }
+  }
+
+  // Names for a game that publishes a count and nothing else. The roster is
+  // rebuilt from the log's own join/leave lines, then reconciled against the
+  // query's count, which stays the authority on how many — a log is a
+  // narrative and can miss a line, and the number on this card is what an
+  // admin uses to decide whether a restart is safe.
+  #playersFromLog(target, profile, snap, running) {
+    if (!running) return;
+    let roster = this.rosters.get(target.id);
+    if (!roster) {
+      roster = new LogRoster(profile.playersFromLog);
+      this.rosters.set(target.id, roster);
+    }
+    const names = roster.read(target.logFile, snap.startedAt);
+    const { players, approximate } = reconcile(names, snap.playerCount);
+    if (!players) return;
+    snap.players = players;
+    // Said out loud rather than silently preferred, because the two sources
+    // disagreeing is itself worth seeing: it means a session ended in a way the
+    // log never recorded.
+    if (approximate) snap.playersApproximate = true;
+  }
+
+  // The world on disk: which one, how far in, and — the part that matters for a
+  // game whose Stop is a kill — how long ago it was last written.
+  #readSave(target, profile) {
+    let reader = this.saveReaders.get(target.id);
+    if (!reader) {
+      reader = new SaveReader(profile.saveInfo);
+      this.saveReaders.set(target.id, reader);
+    }
+    try {
+      return reader.read(target.saveDir || target.steamInstallDir);
+    } catch {
+      return null; // never fatal to a snapshot; the card shows a dash
+    }
+  }
+
+  // --- is it actually in the server browser? --------------------------------
+  //
+  // Everything else on the card is measured from this side of the connection,
+  // and none of it can answer this. A server can be up, answering its query
+  // port, and advertised nowhere — this install's own history has a seven-hour
+  // run of exactly that. So ask Steam, on a slow cadence, and require the answer
+  // to be consistently negative before believing it.
+  //
+  // Called from the poll but never awaited: one HTTPS round trip must not be
+  // able to delay or fail a snapshot. The snapshot carries whatever the last
+  // completed check said.
+  #pollListing(target, profile, snap, running) {
+    const cfg = { ...LISTING_DEFAULTS, ...(profile.listing || {}), ...(target.listing || {}) };
+    let st = this.listing.get(target.id);
+    if (!st || st.startedAt !== snap.startedAt) {
+      // A restart is a fresh run: forget the strikes, keep the restart log,
+      // which is what stops a loop from surviving across restarts.
+      st = {
+        startedAt: snap.startedAt,
+        checkedAt: null, nextAt: 0, inFlight: false,
+        ok: null, listed: null, error: null, ip: null,
+        misses: 0, firstMissAt: null, gaveUp: false,
+      };
+      this.listing.set(target.id, st);
+    }
+
+    snap.listing = {
+      state: !running ? 'offline'
+        : st.ok === true ? (st.listed ? 'listed' : 'not listed')
+        : st.ok === false ? 'unverified'
+        : 'checking',
+      error: st.error,
+      checkedAt: st.checkedAt,
+      misses: st.misses,
+      ip: st.ip,
+    };
+
+    if (!running || st.inFlight || Date.now() < st.nextAt) return;
+
+    // Registration happens seconds into a run, but the process has to get there
+    // first; asking before then produces a miss that means nothing.
+    const age = snap.startedAt ? (Date.now() - Date.parse(snap.startedAt)) / 1000 : 0;
+    if (age < (cfg.afterSeconds ?? LISTING_DEFAULTS.afterSeconds)) return;
+
+    st.inFlight = true;
+    st.nextAt = Date.now() + cfg.everySeconds * 1000;
+    checkListed({
+      apiKey: this.config.steamWebApiKey || null,
+      appId: cfg.appId ?? null,
+      gamePort: target.gamePort,
+      queryPort: target.queryPort,
+    })
+      .then((res) => this.#onListingResult(target, cfg, st, res))
+      .catch((err) => { st.ok = false; st.error = err.message; })
+      .finally(() => { st.inFlight = false; st.checkedAt = Date.now(); });
+  }
+
+  // Apply one check result. The judgement itself is a pure function in
+  // src/steamlisting.js so it can be tested against every ordering of misses,
+  // recoveries and failed checks without a Steam key or a server to sacrifice;
+  // what is left here is the side effects it asks for.
+  #onListingResult(target, cfg, st, res) {
+    const online = this.state.get(target.id)?.playerCount ?? null;
+    const { state, act, alerts } = judgeListing({ state: st, result: res, cfg, online });
+    Object.assign(st, state);
+    for (const a of alerts) this.addAlert(a.level, target.id, a.message, a.category);
+
+    // A confirmed good state is what clears the restart budget: the guard exists
+    // to stop repeated *failed* recoveries, not to ration a server that has been
+    // fine for a week.
+    if (act === 'clear') this.restartLog.delete(`${target.id}:listing`);
+    if (act !== 'restart') return;
+
+    if (!target.startCommand || !this.actions || target.listing?.autoRestart === false) {
+      st.gaveUp = true; // said once, not every five minutes
+      this.addAlert('error', target.id,
+        'Not in the Steam server browser — nobody can find or join it. '
+        + 'Restart it by hand; automatic recovery is off for this target.');
+      return;
+    }
+
+    // A managed restart or a stop is already in flight: leave it alone.
+    if (this.isSuppressed(target.id)) return;
+
+    // Its own budget, separate from the crash watchdog's: these are different
+    // faults with different causes, and one must not spend the other's tries.
+    const key = `${target.id}:listing`;
+    const hourAgo = Date.now() - RESTART_WINDOW_MS;
+    const recent = (this.restartLog.get(key) || []).filter((t) => t > hourAgo);
+    const limit = cfg.maxRestartsPerHour ?? 2;
+    if (recent.length >= limit) {
+      st.gaveUp = true;
+      this.restartLog.set(key, recent);
+      this.addAlert('error', target.id,
+        `Restarted ${recent.length} time(s) for this and it is still not in the Steam browser. `
+        + 'Not trying again — the restart is not fixing it. This is usually ResumeProspect=True '
+        + 'losing the race for Steam registration; see docs/games.md.');
+      return;
+    }
+
+    recent.push(Date.now());
+    this.restartLog.set(key, recent);
+    this.addAlert('error', target.id,
+      `Not in the Steam server browser after ${st.misses} checks — restarting `
+      + `(attempt ${recent.length} of ${limit} this hour). The server is empty, so nobody is being kicked.`);
+
+    // The strikes are cleared by the restart itself: a new process start makes
+    // #pollListing rebuild its state from scratch, and the grace period starts
+    // again. Nothing is checked again until the new run has had time to register.
+    this.actions.restartNow(target.id)
+      .catch((err) => this.addAlert('error', target.id, `Listing restart failed: ${err.message}`));
   }
 
   // The running build, for the games that will only say so if asked. Games with

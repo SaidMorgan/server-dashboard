@@ -384,11 +384,43 @@ export function launchDetached(batPath) {
   try {
     // `start` gives the server its own console window and detaches it from us,
     // so the dashboard can be restarted without killing the game server.
+    //
+    // That second clause is the whole point of `start` and it is load-bearing.
+    // Spawning the .bat directly instead -- which reads like the simpler thing,
+    // and was tried here -- leaves the game server a descendant of this service.
+    // NSSM stops a service by killing its process tree, so the next dashboard
+    // restart takes every game server down with it. `start` is what puts the
+    // server outside that tree. Do not remove it.
     const child = spawn('cmd.exe', ['/c', 'start', '""', '/D', dirOf(target), target], {
       detached: true,
       stdio: 'ignore',
       windowsHide: false,
     });
+
+    // A failed spawn is NOT a thrown exception -- Node reports it on an 'error'
+    // event a tick later, so the try/catch around this call never caught one and
+    // every caller was told `ok: true` for a launch that did not happen. That is
+    // not hypothetical: for one evening this returned success for hours while
+    // starting nothing, including mid-Restart, on servers it had just stopped.
+    // pid is the one honest answer available synchronously.
+    if (!child.pid) {
+      return { ok: false, error: `could not create a process for ${target}` };
+    }
+
+    // Neither handler can change what was already returned. They exist so that a
+    // launch failing after the fact leaves a line behind somewhere, which is the
+    // part that was missing. Note this watches `start`, not the server: cmd here
+    // exits as soon as it has handed the .bat off, and code 0 means only that
+    // the handoff worked.
+    child.on('error', (err) => {
+      console.error(`[launch] ${target} - ${err.message}`);
+    });
+    child.on('exit', (code) => {
+      if (code !== 0) {
+        console.error(`[launch] ${target} - cmd exited with code ${code}`);
+      }
+    });
+
     child.unref();
     return { ok: true };
   } catch (err) {

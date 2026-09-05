@@ -184,6 +184,13 @@ const DEFAULTS = {
     // recent-activity view, not an audit log.
     keep: 200,
   },
+  // A Steam Web API key, from https://steamcommunity.com/dev/apikey. Only one
+  // thing uses it: asking Steam whether a server is actually being advertised in
+  // the server browser, which nothing on this side of the connection can answer
+  // — see src/steamlisting.js. Leave it empty and that check reports
+  // "unverified" and never acts, which is the correct behaviour for not knowing.
+  // Put the key in .env and reference it as "${STEAM_WEB_API_KEY:-}".
+  steamWebApiKey: '',
   // Steam build checks for game targets that carry a steamAppId. See src/steam.js.
   steam: {
     // How often to compare the installed build against the one Steam publishes.
@@ -442,6 +449,31 @@ function validateTarget(t, i, seen, errors) {
   }
   if (t.steamLibrary && t.steamAppId === undefined) {
     errors.push(`${at}.steamLibrary: set without steamAppId, so nothing would ever look in it`);
+  }
+
+  // Browser-listing check. Every field is optional — the game profile carries
+  // sensible numbers — but a hand-typed one that makes the check fire early is
+  // worth refusing, because what it fires is a restart.
+  if (t.listing !== undefined && t.listing !== null) {
+    const l = t.listing;
+    if (typeof l !== 'object' || Array.isArray(l)) {
+      errors.push(`${at}.listing: expected an object, e.g. { "autoRestart": true, "minChecks": 3 }`);
+    } else {
+      for (const k of ['everySeconds', 'afterSeconds', 'minChecks', 'minSpanSeconds', 'maxRestartsPerHour']) {
+        if (l[k] !== undefined && !(isNum(l[k]) && l[k] > 0)) {
+          errors.push(`${at}.listing.${k}: expected a positive number`);
+        }
+      }
+      if (l.minChecks !== undefined && l.minChecks < 2) {
+        errors.push(
+          `${at}.listing.minChecks: must be at least 2 — acting on a single miss is `
+          + `exactly the false alarm this check exists to avoid`,
+        );
+      }
+      if (l.autoRestart && t.startCommand === undefined) {
+        errors.push(`${at}.listing.autoRestart: set without a startCommand, so nothing could restart it`);
+      }
+    }
   }
 
   // Workshop mod checks. Both halves are required or there is nothing to
