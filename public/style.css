@@ -251,6 +251,13 @@ pre.output, pre.logout, pre.update-out {
    in app.js from the rendered text rather than guessed from its length. A
    min-height as well as a max, so a pane that has earned the extra room does
    not then jitter between two sizes as a live counter rewrites one line. */
+/* An empty sunken box above the command line reads as a second input that has
+   gone wrong. Say what it is for instead. */
+pre.output:empty::before {
+  content: 'Output from the last command appears here.';
+  color: var(--dimmer); font-style: italic;
+}
+
 pre.output.tall, pre.update-out.tall, pre.logout.tall {
   max-height: 460px; min-height: 190px;
 }
@@ -460,6 +467,9 @@ details.commands summary:hover, details.moderation summary:hover { color: var(--
    both of these a long path pushes straight out through the side of the row —
    which on a phone means text over the page background. */
 .alerts .msg { min-width: 0; overflow-wrap: anywhere; }
+/* A folded run of identical alerts. Dim and at the end: the count is the least
+   of the three things the row is saying. */
+.alerts .rep { flex: none; margin-left: auto; padding-left: 12px; color: var(--dimmer); }
 
 /* Live connection indicator: dim when polling, lit when the SSE stream is up. */
 .live {

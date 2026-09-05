@@ -37,18 +37,32 @@ let selected = null;
 function buildTabs(targets) {
   if (ONLY || targets.length < 2) return; // one server needs no way to choose it
   tabsEl.innerHTML = '';
-  for (const t of targets) {
+  targets.forEach((t, i) => {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'tab';
     btn.setAttribute('role', 'tab');
     btn.dataset.id = t.id;
+    btn.id = `tab-${t.id}`;
+    btn.setAttribute('aria-controls', `card-${t.id}`);
     btn.innerHTML = '<span class="dot"></span><span class="tab-name"></span><span class="count"></span>';
     btn.querySelector('.tab-name').textContent = t.name;
+    btn.title = i < 9 ? `${t.name} (Alt+${i + 1})` : t.name;
     btn.addEventListener('click', () => selectTarget(t.id));
     tabsEl.append(btn);
     tabs.set(t.id, btn);
-  }
+  });
+
+  // Alt+1..9 from anywhere. Alt rather than a bare digit because half this page
+  // is text boxes, and Alt is the one modifier the browser is not already using
+  // for its own tabs on this machine.
+  document.addEventListener('keydown', (e) => {
+    if (!e.altKey || e.ctrlKey || e.metaKey) return;
+    const n = Number(e.key);
+    if (!n || n > tabs.size) return;
+    e.preventDefault();
+    selectTarget([...tabs.keys()][n - 1]);
+  });
   // Arrow keys walk the bar, which is what a role=tablist promises a screen
   // reader and a keyboard user it will do.
   tabsEl.addEventListener('keydown', (e) => {
@@ -76,6 +90,12 @@ function selectTarget(id) {
     btn.tabIndex = on ? 0 : -1;
   });
   cards.forEach((node, cid) => node.classList.toggle('is-on', cid === id));
+
+  // The card being opened is the one whose charts are about to be looked at,
+  // and it may have been sitting off screen through several of the slow
+  // refreshes below. Bring it up to date on the way in.
+  const node = cards.get(id);
+  if (node) { loadHistory(id, node); loadUsage(id, node); }
 }
 
 // The first card to exist wins if nothing was remembered — never no selection
@@ -171,6 +191,11 @@ function buildCard(target) {
   const node = template.content.firstElementChild.cloneNode(true);
   const caps = capabilities.get(target.id) || {};
   node.dataset.id = target.id;
+  if (!ONLY && tabs.has(target.id)) {
+    node.id = `card-${target.id}`;
+    node.setAttribute('role', 'tabpanel');
+    node.setAttribute('aria-labelledby', `tab-${target.id}`);
+  }
   if (target.kind === 'service') node.classList.add('service-kind');
   if (target.kind === 'service') dropUsageCharts(node.querySelector('.chart-wrap'));
   node.querySelector('.name').textContent = target.name;
@@ -2885,10 +2910,39 @@ async function loadLog(id, node) {
   pre.scrollTop = pre.scrollHeight;
 }
 
+/**
+ * The feed, with a repeat said once.
+ *
+ * One target retrying something that keeps failing -- Steam declining to answer
+ * a listing query, most of a day of it -- filled forty rows with the same
+ * sentence and pushed every player join, backup and restart off the bottom. The
+ * repetition is information, but it is one line of information: what it is, how
+ * many times, and how far back. Only consecutive runs are folded, so nothing
+ * jumps its place in the order to join a group further up.
+ */
+function groupAlerts(list) {
+  const out = [];
+  for (const a of list) {
+    const last = out[out.length - 1];
+    if (last && last.targetId === a.targetId && last.message === a.message && last.level === a.level) {
+      last.count += 1;
+      last.since = a.t; // the list runs newest first, so this walks backwards
+    } else {
+      out.push({ ...a, count: 1, since: a.t });
+    }
+  }
+  return out;
+}
+
 function renderAlerts() {
   if (!alerts.length) { alertsEl.innerHTML = '<li class="empty">nothing yet</li>'; return; }
-  alertsEl.innerHTML = alerts
-    .map((a) => `<li class="${a.level}"><span class="when">${fmtTime(a.t)}</span><span class="who">${escapeHtml(a.targetId)}</span><span class="msg">${escapeHtml(a.message)}</span></li>`)
+  alertsEl.innerHTML = groupAlerts(alerts)
+    .map((a) => {
+      const repeat = a.count > 1
+        ? `<span class="rep" title="First of these at ${fmtTime(a.since)}">×${a.count} since ${fmtTime(a.since)}</span>`
+        : '';
+      return `<li class="${a.level}"><span class="when">${fmtTime(a.t)}</span><span class="who">${escapeHtml(a.targetId)}</span><span class="msg">${escapeHtml(a.message)}</span>${repeat}</li>`;
+    })
     .join('');
 }
 
@@ -2910,9 +2964,12 @@ function applyStatus(status) {
 
   const allUp = status.targets.filter((t) => !ONLY || t.id === ONLY).every((t) => t.up);
   document.getElementById('globalDot').className = `dot ${allUp ? 'up' : 'down'}`;
+  // Which server is open, in the tab title: with one card on screen the browser
+  // tab is otherwise four identical entries called Server Control.
+  const openName = status.targets.find((t) => t.id === (ONLY || selected))?.name;
   document.title = ONLY
-    ? `${status.targets.find((t) => t.id === ONLY)?.name || 'Panel'}`
-    : `${allUp ? '●' : '▲'} Server Control`;
+    ? `${openName || 'Panel'}`
+    : `${allUp ? '●' : '▲'} ${openName ? `${openName} — ` : ''}Server Control`;
 }
 
 function setLive(state) {
@@ -2988,10 +3045,14 @@ async function init() {
 
 init();
 
-// History changes slowly; no need to redraw it on every status update.
-setInterval(() => cards.forEach((node, id) => {
-  loadHistory(id, node);
+// History changes slowly; no need to redraw it on every status update. Only the
+// card on screen is redrawn -- the other three are behind a tab, and whichever
+// one is opened next is refreshed by selectTarget on the way in.
+setInterval(() => {
+  const node = cards.get(selected);
+  if (!node) return;
+  loadHistory(selected, node);
   // Cheap, and the current hour's bar is the one being watched -- a busy
   // evening that only redraws on reload is the version of this that fails.
-  loadUsage(id, node);
-}), 60000);
+  loadUsage(selected, node);
+}, 60000);
