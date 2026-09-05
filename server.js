@@ -7,6 +7,7 @@ import { loadConfig, ConfigError, isLoopback, validateCron } from './src/config.
 import { loadUserProfiles, getProfile } from './src/games/index.js';
 import { createAuth, assertBindIsSafe, UnsafeBindError } from './src/auth.js';
 import { Monitor } from './src/monitor.js';
+import { UsageStats } from './src/usage.js';
 import { Actions } from './src/actions.js';
 import { Backups } from './src/backup.js';
 import { Notifier } from './src/notify.js';
@@ -53,6 +54,7 @@ try {
 
 const auth = createAuth(config, config.dataDir);
 const monitor = new Monitor(config, config.dataDir);
+const usage = new UsageStats(config, config.dataDir);
 const actions = new Actions(config, monitor);
 const backups = new Backups(config, monitor, actions);
 const notifier = new Notifier(config);
@@ -75,7 +77,7 @@ const commandIndex = new CommandIndex(actions);
 // These know about each other, so the wiring happens here rather than through
 // constructor arguments that would be circular.
 actions.backups = backups;
-monitor.attach({ actions, notifier });
+monitor.attach({ actions, notifier, usage });
 steam.attach({ actions });
 mcupdates.attach({ actions, otherBusy: (id) => pluginupdates.busy.has(id) });
 workshop.attach({ actions });
@@ -126,14 +128,20 @@ const publicTarget = (t) => {
     // (Icarus answers Steam queries), so the players panel is not tied to RCON.
     hasQuery: Boolean(profile?.query && t.queryPort),
     // ...but a count with no names is a number, not a list, and the panel says
-    // so instead of rendering an empty one.
-    hasPlayerNames: Boolean(profile && (profile.transport !== 'none' || profile.query?.names)),
+    // so instead of rendering an empty one. A game whose log announces joins and
+    // leaves does have names, even with no transport and a nameless query --
+    // Icarus is read that way, see src/logplayers.js.
+    hasPlayerNames: Boolean(profile && (profile.transport !== 'none' || profile.query?.names
+      || (profile.playersFromLog && t.logFile))),
     consoleCommands: profile?.consoleCommands ?? [],
     // Options for the <placeholders> inside those commands, so the console can
     // suggest the next word as it is typed. Sent whole rather than queried per
     // keystroke: it is a few KB of static data per game and the alternative is
     // a round trip between letters.
     consoleArgs: profile?.argValues ?? {},
+    // alias -> real command word, so typing /duelarena completes the same
+    // subcommands as /arena without the profile carrying the list twice.
+    consoleAliases: profile?.commandAliases ?? {},
     canStart: Boolean(t.startCommand) || t.kind === 'service',
     canUpdate: t.kind === 'service' && Boolean(t.preRestartCommand),
     // Only offered when there is genuinely something to compare against: a
@@ -263,6 +271,17 @@ app.get('/api/players/:id', (req, res) => {
 app.get('/api/history/:id', (req, res) => {
   const minutes = Math.min(Number(req.query.minutes) || 180, config.historyHours * 60);
   res.json(monitor.historyFor(req.params.id, minutes));
+});
+
+// How busy this server usually is, by hour of the weekday and by day of the
+// week. Separate from /api/history on purpose: that one is a live trace of the
+// last few hours, this one is the shape of a normal week, and neither answers
+// the other's question. See src/usage.js.
+app.get('/api/usage/:id', (req, res) => {
+  const t = config.targets.find((x) => x.id === req.params.id);
+  if (!t) return res.status(404).json({ error: 'unknown target' });
+  if (t.kind !== 'game') return res.json({ ok: false, reason: 'not a game server' });
+  return res.json(usage.report(t.id));
 });
 
 app.get('/api/alerts', (req, res) => {
@@ -564,6 +583,7 @@ const server = app.listen(config.port, config.bind, () => {
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
     monitor.stop();
+    usage.flush(Date.now(), { sync: true });
     scheduler.stop();
     steam.stop();
     mcupdates.stop();

@@ -79,8 +79,8 @@ that quietly can't authenticate.
 | `port` | `8770` | Port to listen on |
 | `bind` | `127.0.0.1` | Which interface to listen on. See [Access](#access) |
 | `pollSeconds` | `10` | How often to check every target |
-| `historyHours` | `48` | How much history to keep for the charts |
-| `dataDir` | `data` | Where history, alerts and schedules are stored |
+| `historyHours` | `48` | How much history to keep for the live 3h chart. The busy-times charts keep their own long-term rollup and ignore this |
+| `dataDir` | `data` | Where history, utilisation, alerts and schedules are stored |
 | `backupRoot` | `backups` | Where world archives go |
 | `auth.password` | *(none)* | Required to bind anywhere but localhost |
 | `auth.sessionDays` | `30` | How long a login lasts |
@@ -665,12 +665,51 @@ sc query ServerDashboard
 | Restart when empty | waits for the last player to leave, then restarts; gives up rather than restarting on top of players |
 | Broadcast | send a message to everyone in-game |
 | Console | raw RCON command box, with a menu of the commands this game knows and word-by-word suggestions as you type (pick `gamerule`, get the rules; pick a rule, get its values). Replies are shown in colour, and the pane grows to about double height for a long one |
-| Chart | 3h of player count; red bands are downtime |
+| Utilisation | **Busy times** — how many players are usually on at each hour of today's weekday, with today drawn over it, so four players reads as busy on a Wednesday and quiet on a Saturday. **Week** — the same comparison in player-hours per day. **Heatmap** — the whole week as a 7×24 punch card. **Players** — unique players, newcomers vs regulars, typical session length, how many came back, all-time peak, and who played most this week. **Last 3h** — the live trace of player count, red bands for downtime |
 | Mods | what is installed: version, author, size, and a flag when one needs a decision |
 | Schedules | recurring jobs for this server |
 | Backups | run, download, restore |
 | Bans & moderation | who is banned, with one-click pardon; recent kicks, bans and pardons (Minecraft Java) |
 | Log tail | last 200 lines, with the server's own colours rendered rather than shown as escape codes |
+
+**Why the utilisation charts compare rather than just plot.** A player count on
+its own is not a fact anybody can act on: three players is a busy Tuesday
+morning and a dead Saturday night, and a three-hour line cannot tell a failing
+server from a normal weekday lunchtime, because both are flat. So every bar is
+drawn against a pale one behind it showing what a normal week looks like at that
+moment. The baseline is built from completed weeks only — never the week in
+progress, or this morning would be part of the average this morning is being
+compared against, and the chart could never say anything but "normal".
+
+**Why there is a Players panel at all.** Two servers averaging one player look
+identical on every chart above and are not remotely the same server: one has a
+single person on for six hours, the other has fifteen people dropping in for
+twenty minutes. Player counts cannot tell those apart, and the difference is
+most of what "how much is this being used" means. So the same store also tracks
+sessions — unique players over 7 and 30 days, newcomers against regulars, how
+long a typical session runs, how long a *first* session runs, and how many of
+the people who first appeared a few weeks ago came back. These are the metrics
+[Plan](https://www.playeranalytics.net/) and
+[BattleMetrics](https://www.battlemetrics.com/) both converge on, for the same
+reason.
+
+Sessions are accumulated tick by tick rather than measured as `left - joined`,
+which are the same number right up until the dashboard restarts mid-session and
+the subtraction credits somebody with eight hours they were not there for. A
+connection under a minute is a bounce, not a visit, and is not counted. A
+retention figure is withheld below four people, where it can only ever say 0%,
+50% or 100%. A game that reports how many are online but never who — Icarus
+answers the player query with a blank name in every slot — gets no Players tab
+rather than an empty one that looks broken. The roll is capped at the 100
+players with the most time on the server, so the file cannot grow with the
+playerbase; a household will never come near it.
+
+That history lives in `data/usage.json`, not in the `historyHours` window: it is
+a few running totals per (weekday, hour), a few tens of kilobytes that never
+grow, which is what makes keeping it indefinitely reasonable where keeping the
+ten-second samples is not. It takes a day to draw a first chart and a few weeks
+to mean much; until then the card says so instead of presenting one Tuesday as
+the truth about Tuesdays.
 
 Controls that a game can't support are hidden rather than shown and failing — a
 Valheim card has no broadcast box, because Valheim has no way to send one. A game

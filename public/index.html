@@ -109,9 +109,45 @@
       </div>
 
       <div class="section chart-wrap">
-        <h3>Last 3 hours</h3>
-        <svg class="chart" viewBox="0 0 300 60" preserveAspectRatio="none"></svg>
-        <div class="chart-legend"></div>
+        <div class="chart-head">
+          <h3>Utilisation</h3>
+          <div class="chart-tabs" role="tablist">
+            <button class="chart-tab is-on" data-view="busy" role="tab">Busy times</button>
+            <button class="chart-tab" data-view="week" role="tab">Week</button>
+            <button class="chart-tab" data-view="heat" role="tab">Heatmap</button>
+            <button class="chart-tab tab-people" data-view="people" role="tab">Players</button>
+            <button class="chart-tab" data-view="live" role="tab">Last 3h</button>
+          </div>
+        </div>
+
+        <div class="chart-view" data-view="busy">
+          <div class="busy-verdict"></div>
+          <div class="bars busy-bars"></div>
+          <div class="bar-axis busy-axis"></div>
+        </div>
+
+        <div class="chart-view hidden" data-view="week">
+          <div class="busy-verdict week-verdict"></div>
+          <div class="bars week-bars"></div>
+          <div class="bar-axis week-axis"></div>
+        </div>
+
+        <div class="chart-view hidden" data-view="heat">
+          <div class="heat"></div>
+          <div class="heat-foot"></div>
+        </div>
+
+        <div class="chart-view hidden" data-view="people">
+          <dl class="figures"></dl>
+          <ol class="toplist"></ol>
+        </div>
+
+        <div class="chart-view hidden" data-view="live">
+          <svg class="chart" viewBox="0 0 300 60" preserveAspectRatio="none"></svg>
+          <div class="chart-legend"></div>
+        </div>
+
+        <div class="usage-stats"></div>
       </div>
 
       <details class="section schedules">

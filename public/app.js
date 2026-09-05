@@ -38,6 +38,19 @@ function fmtUptime(iso) {
   return `${m}m`;
 }
 
+// A span of seconds, for things that are not uptime: how long a save has been
+// sitting on disk, how many hours a world has been played. Same shape as
+// fmtUptime deliberately — two units, largest first — so a card carrying both
+// does not read as two different clocks.
+function fmtSpan(secs) {
+  if (secs == null || !Number.isFinite(secs) || secs < 0) return '—';
+  if (secs < 60) return `${Math.floor(secs)}s`;
+  const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
 function fmtBytes(n) {
   if (n == null) return '—';
   if (n < 1024) return `${n} B`;
@@ -88,6 +101,7 @@ function buildCard(target) {
   const caps = capabilities.get(target.id) || {};
   node.dataset.id = target.id;
   if (target.kind === 'service') node.classList.add('service-kind');
+  if (target.kind === 'service') dropUsageCharts(node.querySelector('.chart-wrap'));
   node.querySelector('.name').textContent = target.name;
 
   // Hide controls this target can't perform, rather than offering buttons whose
@@ -162,7 +176,8 @@ function buildCard(target) {
   // sendRcon sees discovered commands too rather than only the curated ones.
   caps.consoleCommands = caps.consoleCommands || [];
   commandFeeds.set(target.id,
-    wireCommandPicker(node, rconInput, caps.consoleCommands, caps.consoleArgs || {}, target.id));
+    wireCommandPicker(node, rconInput, caps.consoleCommands, caps.consoleArgs || {}, target.id,
+      caps.consoleAliases || {}));
   // Not deferred until the Commands panel is opened: the point of this is Tab
   // completion in the console, and nobody opens a reference panel first.
   primeCommandPicker(target.id);
@@ -185,7 +200,7 @@ function buildCard(target) {
       return;
     }
 
-    const known = findCommand(caps.consoleCommands, command);
+    const known = findCommand(caps.consoleCommands, command, caps.consoleAliases || {});
     if (known?.danger && !confirm(`${command}\n\n${known.description}\n\nRun it?`)) return;
 
     const out = node.querySelector('.output');
@@ -212,9 +227,14 @@ function buildCard(target) {
   wireCommands(target, node);
   wireModeration(target, node);
 
+  node.querySelectorAll('.chart-tab').forEach((btn) => {
+    btn.addEventListener('click', () => selectChartView(node.querySelector('.chart-wrap'), btn.dataset.view));
+  });
+
   cardsEl.append(node);
   cards.set(target.id, node);
   loadHistory(target.id, node);
+  loadUsage(target.id, node);
   return node;
 }
 
@@ -604,11 +624,23 @@ function commandLead(command) {
   return lead;
 }
 
+// The same command under another name. /arena is also /duelarena, /soloarena
+// and four more spellings, and a child who types the long one should get the
+// same subcommands as one who types the short one -- so the first word is
+// swapped for the real command before anything is matched against it, rather
+// than the profile carrying six copies of the list. Only the first word: an
+// alias renames a command, never an argument to one.
+function canonicalize(words, aliases) {
+  if (!words.length || !aliases) return words;
+  const real = aliases[words[0].toLowerCase()];
+  return real ? [real, ...words.slice(1)] : words;
+}
+
 // Which known command is the user typing? Longest match wins, so "ban add"
 // beats a bare "ban".
-function findCommand(commands, typed) {
+function findCommand(commands, typed, aliases) {
   if (!commands?.length || !typed?.trim()) return null;
-  const words = typed.trim().toLowerCase().split(/\s+/);
+  const words = canonicalize(typed.trim().toLowerCase().split(/\s+/), aliases);
   const hits = commands
     .map((c) => ({ c, lead: commandLead(c.command) }))
     .filter(({ lead }) => lead.length && lead.every((w, i) => words[i] === w))
@@ -761,7 +793,7 @@ function writeConsole(el, text) {
   fitOutput(el);
 }
 
-function wireCommandPicker(node, input, commands, argValues, targetId) {
+function wireCommandPicker(node, input, commands, argValues, targetId, aliases) {
   const select = node.querySelector('.rcon-pick');
   const help = node.querySelector('.cmd-help');
 
@@ -822,9 +854,9 @@ function wireCommandPicker(node, input, commands, argValues, targetId) {
     select.value = ''; // so picking the same command twice still fires
   });
 
-  input.addEventListener('input', () => showHelp(findCommand(commands, input.value)));
+  input.addEventListener('input', () => showHelp(findCommand(commands, input.value, aliases)));
 
-  wireTypeahead(node, input, commands, argValues || {}, targetId, showHelp);
+  wireTypeahead(node, input, commands, argValues || {}, targetId, showHelp, aliases);
 
   // How discovered commands get in later. The array is captured by reference by
   // wireTypeahead, so pushing into it is enough for Tab completion; the select
@@ -1060,7 +1092,7 @@ function wordAtCaret(value, caret) {
   return { start, end, prefix: isPlaceholder(text) ? '' : value.slice(start, caret) };
 }
 
-function wireTypeahead(node, input, commands, argValues, targetId, showHelp) {
+function wireTypeahead(node, input, commands, argValues, targetId, showHelp, aliases) {
   const list = node.querySelector('.cmd-suggest');
   if (!list) return;
   const MAX = 12;
@@ -1125,7 +1157,7 @@ function wireTypeahead(node, input, commands, argValues, targetId, showHelp) {
     if (document.activeElement !== input) { close(); return; }
     const caret = input.selectionStart ?? input.value.length;
     at = wordAtCaret(input.value, caret);
-    const words = splitWords(input.value.slice(0, at.start));
+    const words = canonicalize(splitWords(input.value.slice(0, at.start)), aliases);
 
     const all = nextWords(commands, argValues, words, targetId);
     // A leading quote is the slot's, not the typist's: "Ali should still find
@@ -1154,7 +1186,7 @@ function wireTypeahead(node, input, commands, argValues, targetId, showHelp) {
     const value = input.value;
     // A trailing space only when there is another word to come, so a finished
     // command does not have to be backspaced before Enter.
-    const words = [...splitWords(value.slice(0, at.start)), row.value];
+    const words = canonicalize([...splitWords(value.slice(0, at.start)), row.value], aliases);
     const more = expectsMore(commands, words) || nextWords(commands, argValues, words, targetId).length > 0;
     const tail = value.slice(at.end);
     // A trailing space is only added when there isn't one already: a command
@@ -1167,7 +1199,7 @@ function wireTypeahead(node, input, commands, argValues, targetId, showHelp) {
     const caret = at.start + row.value.length + gap.length
       + (more && !gap ? tail.match(/^\s*/)[0].length : 0);
     input.setSelectionRange(caret, caret);
-    showHelp(findCommand(commands, input.value));
+    showHelp(findCommand(commands, input.value, aliases));
     if (more) refresh(); else close();
   };
 
@@ -1581,6 +1613,36 @@ function statTiles(snap) {
   // the grid's minmax floor means they wrap or spill rather than widening it.
   // Spanning also happens to consume the empty cell that used to sit at the end
   // of this row, so the row comes out full instead of half-blank.
+  // Whether Steam is actually advertising this server, which is a different
+  // question from whether it answers its own query port -- a server can do the
+  // second for hours while failing the first, and then it is running perfectly
+  // and nobody can find it. Only shown for a target that checks; see
+  // src/steamlisting.js.
+  if (snap.listing && snap.listing.state !== 'offline') {
+    const s = snap.listing.state;
+    // "unverified" is not a warning. It means the dashboard could not ask --
+    // no API key, or no route to Steam -- and colouring it amber would train
+    // everyone to ignore the one tile that means something is wrong.
+    tiles.push(['Browser',
+      s === 'listed' ? 'listed'
+        : s === 'not listed' ? `not listed (${snap.listing.misses})`
+        : s,
+      s === 'listed' ? 'good' : s === 'not listed' ? 'bad' : '']);
+  }
+
+  // The world on disk. "Saved" is the one that changes a decision: Stop and
+  // Restart on a game with no remote interface are a kill, and this is the only
+  // evidence of what that would cost.
+  if (snap.save) {
+    const world = [snap.save.prospect, snap.save.difficulty].filter(Boolean).join(' · ');
+    if (world) tiles.push(['World', world, '', 'wide']);
+    if (snap.save.elapsedSeconds != null) tiles.push(['Played', fmtSpan(snap.save.elapsedSeconds), '']);
+    // An hour-old save is not itself a fault -- an idle server writes nothing --
+    // so this only turns amber once the number is large enough to be worth
+    // reading before pressing Restart.
+    tiles.push(['Saved', fmtSpan(snap.save.ageSeconds), snap.save.ageSeconds > 3600 ? 'warn' : '']);
+  }
+
   if (snap.version) tiles.push(['Version', snap.version, '', 'wide']);
   return tiles;
 }
@@ -1602,6 +1664,9 @@ function render(snap, pending, updates, mods) {
     // A query that is merely 'starting' is a server still loading, not a sick
     // one — the same grace the RCON games already get from readyAfterSeconds.
     || (snap.kind === 'game' && snap.query === 'error')
+    // Running and unfindable is exactly the state that looks fine everywhere
+    // else on the card, so it has to reach the dot or it reaches nothing.
+    || (snap.kind === 'game' && snap.listing?.state === 'not listed')
     || (snap.kind === 'service' && !snap.healthy));
   dot.className = `dot ${!snap.up ? 'down' : degraded ? 'degraded' : 'up'}`;
 
@@ -1641,7 +1706,13 @@ function render(snap, pending, updates, mods) {
   } else {
     list.innerHTML = players
       .map((p) => `<li><span>${escapeHtml(p.name)}</span><span class="pid">${escapeHtml(p.id || '')}</span></li>`)
-      .join('');
+      .join('')
+      // Names read out of a log, against a count measured over the wire, and the
+      // two disagree. The count is the one to trust for "is it safe to restart",
+      // so say which is which rather than quietly showing the shorter list.
+      + (snap.playersApproximate
+        ? `<li class="empty">the Steam query counts ${count} — this list is from the server log and may be behind</li>`
+        : '');
   }
 
   const cd = node.querySelector('.countdown');
@@ -2339,6 +2410,338 @@ async function loadMods(id, node, { quiet = false } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Utilisation: busy times and the week
+// ---------------------------------------------------------------------------
+//
+// The live line answers "what is it doing"; these two answer "how much is it
+// being used", which is a different question and was the one nobody could get
+// off this page. A three-hour trace cannot tell a dead server from a Tuesday
+// morning, because a normal Tuesday morning is also flat.
+//
+// So both charts are drawn the same way: a pale bar for what a normal week
+// looks like at this moment, and a solid bar in front of it for what is
+// actually happening. Neither number means much alone -- four players is a lot
+// on a Wednesday lunchtime and nothing on a Saturday night -- and the whole
+// design is about making that comparison the thing you see first.
+
+const DOW_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const DOW_LONG = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+// 12-hour labels, because the question being asked is a human one ("is Saturday
+// evening busy") and 20:00 is not how anybody says it here.
+function hourLabel(h) {
+  if (h === 0) return '12a';
+  if (h === 12) return '12p';
+  return h < 12 ? `${h}a` : `${h - 12}p`;
+}
+
+function fmtPlayers(n) {
+  if (n == null) return '—';
+  return n >= 10 ? String(Math.round(n)) : (Math.round(n * 10) / 10).toString();
+}
+
+function fmtHours(n) {
+  if (n == null) return '—';
+  if (n === 0) return '0h';
+  if (n < 1) return `${Math.round(n * 60)}m`;
+  return `${Math.round(n * 10) / 10}h`;
+}
+
+function selectChartView(node, view) {
+  node.querySelectorAll('.chart-tab').forEach((b) => b.classList.toggle('is-on', b.dataset.view === view));
+  node.querySelectorAll('.chart-view').forEach((v) => v.classList.toggle('hidden', v.dataset.view !== view));
+}
+
+/**
+ * One column: a pale "typical" bar with the real one drawn in front of it.
+ *
+ * Anything above zero gets at least a sliver of height. A bar rounded down to
+ * nothing is indistinguishable from an hour nobody played, and those two say
+ * opposite things about whether the server is worth keeping up.
+ */
+function barColumn({ typical, actual, scale, classes, title }) {
+  const pct = (v) => (v == null || v <= 0 ? 0 : Math.max(3, Math.min(100, (v / scale) * 100)));
+  const t = pct(typical);
+  const a = pct(actual);
+  return `<div class="col ${classes.join(' ')}" title="${escapeHtml(title)}">
+    ${t ? `<div class="typical" style="height:${t.toFixed(1)}%"></div>` : ''}
+    ${a ? `<div class="actual" style="height:${a.toFixed(1)}%"></div>` : ''}
+  </div>`;
+}
+
+/**
+ * Is right now busier than a normal one of these, and by enough to say so?
+ *
+ * The band is deliberately wide. Player counts on a family server are small
+ * integers, so one extra kid is a 50% swing, and a verdict that flips between
+ * "busier" and "quieter" every time somebody logs in is noise wearing a
+ * conclusion's clothes. The additive term is what stops near-empty hours --
+ * where every ratio is enormous -- from setting it off.
+ */
+function busyVerdict(cur, dow) {
+  if (!cur || cur.typical == null || !cur.weeks) {
+    return { cls: '', html: `Still learning what a normal <b>${DOW_LONG[dow]}</b> looks like.` };
+  }
+  const t = cur.typical;
+  const a = cur.actual ?? 0;
+  const usually = `usually ${fmtPlayers(t)} at ${hourLabel(cur.hour)} on a ${DOW_LONG[dow]}`;
+  const nowText = cur.actual == null ? 'nobody on' : `${fmtPlayers(a)} on`;
+  if (t < 0.25 && a < 0.25) return { cls: '', html: `<b>Quiet</b>, as it usually is at this hour.` };
+  if (a >= t * 1.35 + 0.4) return { cls: 'busier', html: `<b>Busier than usual</b> — ${nowText}, ${usually}.` };
+  if (a <= t * 0.65 - 0.4 || (a === 0 && t >= 0.5)) return { cls: 'quieter', html: `<b>Quieter than usual</b> — ${nowText}, ${usually}.` };
+  return { cls: '', html: `<b>About as busy as usual</b> — ${nowText}, ${usually}.` };
+}
+
+function renderBusy(wrap, res) {
+  const bars = wrap.querySelector('.busy-bars');
+  const axis = wrap.querySelector('.busy-axis');
+  const rows = res.day;
+  const known = rows.filter((r) => r.typical != null || r.actual != null);
+  if (!known.length) {
+    bars.innerHTML = '<div class="empty">no usage recorded yet</div>';
+    axis.innerHTML = '';
+    wrap.querySelector('.busy-verdict').innerHTML = 'Collecting — a first day of history takes a day.';
+    return;
+  }
+
+  // One scale for both series, or the overlay compares two different rulers.
+  const scale = Math.max(0.5, ...rows.map((r) => Math.max(r.typical ?? 0, r.actual ?? 0)));
+
+  bars.innerHTML = rows.map((r) => {
+    const classes = [];
+    if (r.hour === res.hour) classes.push('now');
+    if (r.partial) classes.push('partial');
+    if (r.future) classes.push('future');
+    const parts = [`${hourLabel(r.hour)} on ${DOW_LONG[res.dow]}`];
+    parts.push(r.typical == null ? 'no history yet' : `usually ${fmtPlayers(r.typical)} (peak ${r.typicalPeak ?? 0})`);
+    if (!r.future) parts.push(r.actual == null ? 'today: no reading' : `today ${fmtPlayers(r.actual)} (peak ${r.peak ?? 0})`);
+    if (r.partial) parts.push('hour still in progress');
+    return barColumn({ typical: r.typical, actual: r.actual, scale, classes, title: parts.join(' · ') });
+  }).join('');
+
+  // Four labels, not twenty-four: at card width the rest collide into a smear.
+  axis.innerHTML = rows.map((r) => {
+    const show = r.hour % 6 === 0;
+    return `<span class="${r.hour === res.hour ? 'now' : ''}">${show ? hourLabel(r.hour) : ''}</span>`;
+  }).join('');
+
+  const v = busyVerdict(rows[res.hour], res.dow);
+  const verdict = wrap.querySelector('.busy-verdict');
+  verdict.className = `busy-verdict ${v.cls}`;
+  verdict.innerHTML = v.html;
+}
+
+function renderWeek(wrap, res) {
+  const bars = wrap.querySelector('.week-bars');
+  const axis = wrap.querySelector('.week-axis');
+  const rows = res.week;
+  const known = rows.filter((r) => r.typical != null || r.actual != null);
+  if (!known.length) {
+    bars.innerHTML = '<div class="empty">no usage recorded yet</div>';
+    axis.innerHTML = '';
+    wrap.querySelector('.week-verdict').innerHTML = '';
+    return;
+  }
+
+  const scale = Math.max(0.25, ...rows.map((r) => Math.max(r.typical ?? 0, r.actual ?? 0)));
+  bars.innerHTML = rows.map((r) => {
+    const classes = [];
+    if (r.today) classes.push('now', 'today', 'partial');
+    if (r.future) classes.push('future');
+    const parts = [DOW_LONG[r.dow]];
+    parts.push(r.typical == null ? 'no history yet' : `usually ${fmtHours(r.typical)} of play`);
+    if (!r.future) parts.push(r.actual == null ? 'nothing this week' : `this week ${fmtHours(r.actual)} (peak ${r.peak ?? 0})`);
+    if (r.today) parts.push('today, still going');
+    return barColumn({ typical: r.typical, actual: r.actual, scale, classes, title: parts.join(' · ') });
+  }).join('');
+
+  axis.innerHTML = rows.map((r) => `<span class="${r.today ? 'now' : ''}">${DOW_SHORT[r.dow]}</span>`).join('');
+
+  // Weekly total against a typical week, counting only the days that have
+  // happened -- comparing three days of this week against seven of a normal one
+  // would report a collapse every Wednesday.
+  const done = rows.filter((r) => !r.future);
+  const actual = done.reduce((a, r) => a + (r.actual ?? 0), 0);
+  const typical = done.reduce((a, r) => a + (r.typical ?? 0), 0);
+  const el = wrap.querySelector('.week-verdict');
+  if (!typical) {
+    el.className = 'busy-verdict week-verdict';
+    el.innerHTML = `<b>${fmtHours(actual)}</b> of play so far this week.`;
+    return;
+  }
+  const delta = Math.round(((actual - typical) / typical) * 100);
+  const cls = delta >= 20 ? 'busier' : delta <= -20 ? 'quieter' : '';
+  const word = delta >= 20 ? 'above' : delta <= -20 ? 'below' : 'in line with';
+  el.className = `busy-verdict week-verdict ${cls}`;
+  el.innerHTML = `<b>${fmtHours(actual)}</b> of play so far this week — ${word} the usual ${fmtHours(typical)} by this point${delta ? ` (${delta > 0 ? '+' : ''}${delta}%)` : ''}.`;
+}
+
+function renderUsageStats(wrap, res) {
+  const el = wrap.querySelector('.usage-stats');
+  const s = res.summary;
+  if (!s) { el.innerHTML = ''; return; }
+  const bits = [];
+  bits.push(`<span>7d <b>${fmtHours(s.playerHours7d)}</b> played</span>`);
+  if (s.playerHoursPrev7d) {
+    const d = Math.round(((s.playerHours7d - s.playerHoursPrev7d) / s.playerHoursPrev7d) * 100);
+    bits.push(`<span class="trend ${d >= 0 ? 'up' : 'down'}">${d > 0 ? '+' : ''}${d}% vs prev</span>`);
+  }
+  if (s.peak7d != null) bits.push(`<span>peak <b>${s.peak7d}</b></span>`);
+  if (s.peakEver && s.peakEver > (s.peak7d ?? 0)) bits.push(`<span>record <b>${s.peakEver}</b> ${escapeHtml(fmtWhen(s.peakEverAt))}</span>`);
+  if (s.activeShare != null) bits.push(`<span>anyone on <b>${Math.round(s.activeShare * 100)}%</b> of the time</span>`);
+  if (s.busiest) bits.push(`<span>busiest <b>${DOW_SHORT[s.busiest.dow]} ${hourLabel(s.busiest.hour)}</b></span>`);
+  // The quietest slot is the one worth acting on: it is when to schedule the
+  // restart that a busy hour would have interrupted.
+  if (s.quietest) bits.push(`<span>quietest <b>${DOW_SHORT[s.quietest.dow]} ${hourLabel(s.quietest.hour)}</b></span>`);
+  if (s.uptime7d != null) bits.push(`<span><b>${(s.uptime7d * 100).toFixed(1)}%</b> up</span>`);
+  if (res.weeks) bits.push(`<span class="trend down">typical = ${res.weeks} week${res.weeks === 1 ? '' : 's'}</span>`);
+  el.innerHTML = bits.join('');
+}
+
+function fmtDuration(sec) {
+  if (sec == null) return null;
+  const m = Math.round(sec / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
+}
+
+/**
+ * The punch card: seven rows of twenty-four cells, opacity carrying the average.
+ *
+ * The floor on a non-zero cell is the whole trick. Scaling opacity straight
+ * from the average would render a real but small number as nothing, which is
+ * the one thing this chart must never do -- "quiet" and "never used" are
+ * different answers to when-can-I-restart, and they would look identical.
+ */
+function renderHeatmap(wrap, res) {
+  const el = wrap.querySelector('.heat');
+  const foot = wrap.querySelector('.heat-foot');
+  if (!res.heatmap?.length || !res.hottest) {
+    el.innerHTML = '<div class="empty">no usage recorded yet</div>';
+    foot.innerHTML = '';
+    return;
+  }
+
+  const cells = [];
+  for (const row of res.heatmap) {
+    cells.push(`<div class="rowlab">${DOW_SHORT[row[0].dow]}</div>`);
+    for (const c of row) {
+      const known = c.avg != null;
+      const a = known && c.avg > 0 ? 0.12 + (c.avg / res.hottest) * 0.88 : 0;
+      const now = c.dow === res.dow && c.hour === res.hour;
+      const title = `${DOW_LONG[c.dow]} ${hourLabel(c.hour)} — ${known ? `${fmtPlayers(c.avg)} on average` : 'never observed'}`;
+      cells.push(`<div class="cell ${known ? '' : 'blank'} ${now ? 'now' : ''}" style="--a:${a.toFixed(3)}" title="${escapeHtml(title)}"></div>`);
+    }
+  }
+  // The hour scale, on the row below, at the same six-hour marks as the busy chart.
+  cells.push('<div class="rowlab"></div>');
+  for (let h = 0; h < 24; h++) cells.push(`<div class="hourlab">${h % 6 === 0 ? hourLabel(h) : ''}</div>`);
+  el.innerHTML = cells.join('');
+
+  const swatches = [0, 0.25, 0.5, 0.75, 1]
+    .map((f) => `<i style="--a:${f ? (0.12 + f * 0.88).toFixed(2) : 0}"></i>`)
+    .join('');
+  foot.innerHTML = `<span>darker = quieter</span><span class="heat-scale">0 ${swatches} ${fmtPlayers(res.hottest)}</span>`;
+}
+
+function figure(label, value, note) {
+  if (value == null) return `<div><dt>${escapeHtml(label)}</dt><dd class="none">—</dd></div>`;
+  return `<div><dt>${escapeHtml(label)}</dt><dd>${value}${note ? ` <small>${note}</small>` : ''}</dd></div>`;
+}
+
+/**
+ * Who is actually playing, rather than how many.
+ *
+ * This is the half of "utilisation" a player count cannot reach. Two servers
+ * averaging one player look identical on every chart above and are not the same
+ * server at all: one has a single person on for hours, the other has fifteen
+ * people dropping in. Unique players, session length and the newcomer/regular
+ * split are what tell those apart, and they are what every analytics tool for
+ * game servers converges on.
+ */
+function renderPeople(wrap, res) {
+  const figs = wrap.querySelector('.figures');
+  const top = wrap.querySelector('.toplist');
+  const p = res.people;
+  if (!p) {
+    figs.innerHTML = '';
+    top.innerHTML = '<li class="empty">this game reports how many are online, but not who</li>';
+    return;
+  }
+
+  const s = res.summary || {};
+  figs.innerHTML = [
+    figure('Players, 7d', p.unique7d, p.unique30d ? `of ${p.unique30d} in 30d` : ''),
+    figure('New this week', p.newcomers7d, p.regulars7d ? `${p.regulars7d} regular${p.regulars7d === 1 ? '' : 's'}` : ''),
+    figure('Sessions, 7d', p.sessions7d, p.online ? `${p.online} on now` : ''),
+    figure('Typical session', fmtDuration(p.avgSession)),
+    figure('Longest, 7d', fmtDuration(p.longestSession)),
+    // How long a newcomer's very first visit lasts: the difference between
+    // people arriving and people staying.
+    figure('First visit', fmtDuration(p.firstSessionAvg)),
+    figure('Came back', p.retention == null ? null : `${Math.round(p.retention * 100)}%`,
+      p.retention == null ? '' : `of ${p.retentionCohort}`),
+    figure('Peak ever', s.peakEver ?? null, s.peakEverAt ? fmtWhen(s.peakEverAt) : ''),
+  ].join('');
+
+  if (!p.top?.length) {
+    top.innerHTML = '<li class="empty">nobody has played in the last week</li>';
+    return;
+  }
+  const most = Math.max(...p.top.map((t) => t.seconds));
+  top.innerHTML = p.top.map((t) => `<li>
+    <span class="who">${escapeHtml(t.name)}${t.online ? ' <span class="live" title="online now">●</span>' : ''}</span>
+    <span class="track"><i style="width:${Math.max(2, (t.seconds / most) * 100).toFixed(1)}%"></i></span>
+    <span class="amt">${fmtDuration(t.seconds)}</span>
+  </li>`).join('');
+}
+
+/**
+ * Fall back to the plain response-time trace, and stop offering the rest.
+ *
+ * A service has no players, so both comparison charts would be flat lines
+ * pretending to be information, and the tabs would be two ways of reaching
+ * them. The heading goes back to naming what is actually on screen.
+ */
+function dropUsageCharts(wrap) {
+  if (!wrap || wrap.dataset.usage === 'off') return;
+  wrap.dataset.usage = 'off';
+  wrap.querySelector('.chart-tabs').classList.add('hidden');
+  wrap.querySelector('.usage-stats').innerHTML = '';
+  wrap.querySelector('h3').textContent = 'Last 3 hours';
+  selectChartView(wrap, 'live');
+}
+
+async function loadUsage(id, node) {
+  const wrap = node.querySelector('.chart-wrap');
+  if (!wrap) return;
+  let res = null;
+  try { res = await api(`/api/usage/${id}`); } catch { /* handled below */ }
+
+  // A service has no players, so the two comparison charts would be flat lines
+  // pretending to be information. It keeps the response-time trace instead, and
+  // loses the tab bar rather than showing two tabs that say nothing.
+  if (!res?.ok) {
+    dropUsageCharts(wrap);
+    return;
+  }
+  renderBusy(wrap, res);
+  renderWeek(wrap, res);
+  renderHeatmap(wrap, res);
+  renderPeople(wrap, res);
+  renderUsageStats(wrap, res);
+
+  // A game that answers "how many" but never "who" gets no Players tab at all.
+  // Icarus is one: its player query returns the right number of entries with an
+  // empty name in every one, so the panel would be permanently empty and read
+  // as broken rather than as inapplicable.
+  const peopleTab = wrap.querySelector('.tab-people');
+  peopleTab.classList.toggle('hidden', !res.hasNames);
+  if (!res.hasNames && peopleTab.classList.contains('is-on')) selectChartView(wrap, 'busy');
+}
+
+// ---------------------------------------------------------------------------
 // History chart and logs
 // ---------------------------------------------------------------------------
 
@@ -2495,4 +2898,9 @@ async function init() {
 init();
 
 // History changes slowly; no need to redraw it on every status update.
-setInterval(() => cards.forEach((node, id) => loadHistory(id, node)), 60000);
+setInterval(() => cards.forEach((node, id) => {
+  loadHistory(id, node);
+  // Cheap, and the current hour's bar is the one being watched -- a busy
+  // evening that only redraws on reload is the version of this that fails.
+  loadUsage(id, node);
+}), 60000);
