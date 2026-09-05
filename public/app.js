@@ -32,7 +32,12 @@ let alerts = [];
 const tabsEl = document.getElementById('serverTabs');
 const tabs = new Map(); // id -> button
 const TAB_KEY = 'serverControl.tab';
+const SCOPE_KEY = 'serverControl.feedScope';
 let selected = null;
+// The feed follows the open tab by default: when one server is misbehaving, its
+// own retries are exactly what buries its history in a shared list.
+let feedScope = 'tab';
+try { if (localStorage.getItem(SCOPE_KEY) === 'all') feedScope = 'all'; } catch { /* private mode */ }
 
 function buildTabs(targets) {
   if (ONLY || targets.length < 2) return; // one server needs no way to choose it
@@ -96,6 +101,8 @@ function selectTarget(id) {
   // refreshes below. Bring it up to date on the way in.
   const node = cards.get(id);
   if (node) { loadHistory(id, node); loadUsage(id, node); }
+
+  if (!ONLY) renderAlerts(); // the feed follows the tab
 }
 
 // The first card to exist wins if nothing was remembered — never no selection
@@ -2934,9 +2941,41 @@ function groupAlerts(list) {
   return out;
 }
 
+function targetName(id) {
+  return capabilities.get(id)?.name || id;
+}
+
 function renderAlerts() {
-  if (!alerts.length) { alertsEl.innerHTML = '<li class="empty">nothing yet</li>'; return; }
-  alertsEl.innerHTML = groupAlerts(alerts)
+  const scoped = feedScope === 'tab' && selected
+    ? alerts.filter((a) => a.targetId === selected)
+    : alerts;
+
+  // The heading says what is being looked at, and the button says what the
+  // other view would be -- a toggle labelled with its own current state is the
+  // one control everyone reads backwards.
+  const head = document.getElementById('feedHead');
+  const scopeBtn = document.getElementById('feedScope');
+  if (head) {
+    head.innerHTML = feedScope === 'tab' && selected
+      ? `Activity · <b>${escapeHtml(targetName(selected))}</b>`
+      : 'Activity · all servers';
+  }
+  if (scopeBtn) {
+    scopeBtn.textContent = feedScope === 'tab' ? 'Show all servers' : 'Only this server';
+    scopeBtn.classList.toggle('hidden', Boolean(ONLY) || tabs.size < 2);
+  }
+
+  // Every row says "icarus" when only Icarus is being shown; the heading has
+  // already said it once.
+  alertsEl.classList.toggle('scoped', feedScope === 'tab' && Boolean(selected));
+
+  if (!scoped.length) {
+    alertsEl.innerHTML = `<li class="empty">nothing yet${feedScope === 'tab' && selected ? ` for ${escapeHtml(targetName(selected))}` : ''}</li>`;
+    return;
+  }
+  // The buffer is deep so that filtering cannot empty a quiet server's feed;
+  // the page still only shows a screenful of it.
+  alertsEl.innerHTML = groupAlerts(scoped).slice(0, 40)
     .map((a) => {
       const repeat = a.count > 1
         ? `<span class="rep" title="First of these at ${fmtTime(a.since)}">×${a.count} since ${fmtTime(a.since)}</span>`
@@ -2980,7 +3019,7 @@ function setLive(state) {
 async function refresh() {
   try {
     applyStatus(await api('/api/status'));
-    if (!ONLY) { alerts = await api('/api/alerts?limit=40'); renderAlerts(); }
+    if (!ONLY) { alerts = await api('/api/alerts?limit=200'); renderAlerts(); }
   } catch {
     document.getElementById('globalDot').className = 'dot down';
     document.getElementById('clock').textContent = 'dashboard offline';
@@ -3009,7 +3048,7 @@ function connectStream() {
   source.addEventListener('alert', (event) => {
     if (ONLY) return;
     alerts.unshift(JSON.parse(event.data));
-    alerts = alerts.slice(0, 40);
+    alerts = alerts.slice(0, 200);
     renderAlerts();
   });
 
@@ -3033,6 +3072,12 @@ async function init() {
       });
     }
   } catch { /* auth state is a nicety, not a requirement */ }
+
+  document.getElementById('feedScope').addEventListener('click', () => {
+    feedScope = feedScope === 'tab' ? 'all' : 'tab';
+    try { localStorage.setItem(SCOPE_KEY, feedScope); } catch { /* private mode */ }
+    renderAlerts();
+  });
 
   const targets = await api('/api/targets');
   for (const t of targets) capabilities.set(t.id, t);

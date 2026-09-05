@@ -448,7 +448,9 @@ details.commands summary:hover, details.moderation summary:hover { color: var(--
 .usage-stats .trend.down { color: var(--dimmer); }
 
 .feed { padding: 0 16px 24px; max-width: 1500px; margin: 0 auto; }
+.feed-head { display: flex; align-items: center; gap: 10px; }
 .feed h2 { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
+.feed h2 b { color: var(--text); font-weight: 600; }
 .alerts { list-style: none; margin: 0; padding: 0; font-family: var(--mono); font-size: 12.5px; }
 .alerts li {
   padding: 6px 10px; border-left: 3px solid var(--line);
@@ -460,6 +462,7 @@ details.commands summary:hover, details.moderation summary:hover { color: var(--
 .alerts li.info { border-left-color: var(--accent); }
 .alerts .when { color: var(--dimmer); flex: none; }
 .alerts .who { color: var(--accent); flex: none; }
+.alerts.scoped .who { display: none; }
 
 /* Alert text is arbitrary: a failure carries whatever Windows said, and a path
    like C:\...\Steam\steamapps\common\PalServer has no space to break at. A flex
