@@ -8,6 +8,7 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🎛️</text></svg>" />
 </head>
 <body>
+  <div class="chrome">
   <header class="topbar">
     <div class="brand">
       <span class="dot" id="globalDot"></span>
@@ -20,6 +21,13 @@
       <button id="signout" class="icon hidden" title="Sign out">Sign out</button>
     </div>
   </header>
+
+  <!-- One server at a time. The bar is the overview the old four-column grid
+       was providing: every target's dot and player count stay visible whichever
+       one is open, which is the only part of a card you read from across the
+       room. -->
+  <nav id="serverTabs" class="tabs hidden" role="tablist" aria-label="Servers"></nav>
+  </div><!-- /chrome -->
 
   <main id="cards" class="cards"></main>
 
@@ -55,6 +63,13 @@
         <button data-act="updateCancel" class="mini update-cancel hidden">Start it anyway</button>
       </div>
 
+      <!-- Two columns on a wide screen, one on a narrow one. A single card
+           stretched across a 27" monitor is a column of text with a metre of
+           empty panel beside it; splitting it is what makes "one at a time"
+           read as a layout rather than as a waste of the screen. -->
+      <div class="card-body">
+      <div class="col col-main">
+
       <div class="section players-list">
         <h3>Players</h3>
         <ul class="playerlist"></ul>
@@ -88,24 +103,6 @@
         <div class="action-status"></div>
         <div class="no-remote hidden"></div>
         <pre class="update-out hidden"></pre>
-      </div>
-
-      <div class="section console game-only">
-        <h3>RCON console</h3>
-        <pre class="output"></pre>
-        <div class="btnrow rcon-pickrow hidden">
-          <select class="rcon-pick">
-            <option value="">Commands…</option>
-          </select>
-        </div>
-        <div class="cmd-help hidden"></div>
-        <div class="btnrow cmd-typeahead">
-          <input class="rcon-input" type="text" placeholder="e.g. listplayers" spellcheck="false"
-                 autocomplete="off" autocapitalize="off" autocorrect="off" role="combobox"
-                 aria-expanded="false" aria-autocomplete="list" />
-          <button class="btn rcon-send">Run</button>
-          <ul class="cmd-suggest hidden" role="listbox"></ul>
-        </div>
       </div>
 
       <div class="section chart-wrap">
@@ -149,6 +146,28 @@
 
         <div class="usage-stats"></div>
       </div>
+
+      </div><!-- /col-main -->
+      <div class="col col-side">
+
+      <div class="section console game-only">
+        <h3>RCON console</h3>
+        <pre class="output"></pre>
+        <div class="btnrow rcon-pickrow hidden">
+          <select class="rcon-pick">
+            <option value="">Commands…</option>
+          </select>
+        </div>
+        <div class="cmd-help hidden"></div>
+        <div class="btnrow cmd-typeahead">
+          <input class="rcon-input" type="text" placeholder="e.g. listplayers" spellcheck="false"
+                 autocomplete="off" autocapitalize="off" autocorrect="off" role="combobox"
+                 aria-expanded="false" aria-autocomplete="list" />
+          <button class="btn rcon-send">Run</button>
+          <ul class="cmd-suggest hidden" role="listbox"></ul>
+        </div>
+      </div>
+
 
       <details class="section schedules">
         <summary>Schedules</summary>
@@ -274,6 +293,9 @@
         <summary>Log tail</summary>
         <pre class="logout">loading…</pre>
       </details>
+
+      </div><!-- /col-side -->
+      </div><!-- /card-body -->
     </article>
   </template>
 

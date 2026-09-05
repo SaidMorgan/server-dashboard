@@ -21,6 +21,77 @@ const cards = new Map();
 const capabilities = new Map(); // id -> what this target can actually do
 let alerts = [];
 
+// ---------------------------------------------------------------------------
+// Server tabs
+//
+// One card is on screen at a time and the tab bar picks which. The bar carries
+// each server's dot and player count so the thing the old side-by-side grid was
+// actually good for -- seeing at a glance that something is down, or that
+// somebody is on -- survives showing one card.
+// ---------------------------------------------------------------------------
+const tabsEl = document.getElementById('serverTabs');
+const tabs = new Map(); // id -> button
+const TAB_KEY = 'serverControl.tab';
+let selected = null;
+
+function buildTabs(targets) {
+  if (ONLY || targets.length < 2) return; // one server needs no way to choose it
+  tabsEl.innerHTML = '';
+  for (const t of targets) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tab';
+    btn.setAttribute('role', 'tab');
+    btn.dataset.id = t.id;
+    btn.innerHTML = '<span class="dot"></span><span class="tab-name"></span><span class="count"></span>';
+    btn.querySelector('.tab-name').textContent = t.name;
+    btn.addEventListener('click', () => selectTarget(t.id));
+    tabsEl.append(btn);
+    tabs.set(t.id, btn);
+  }
+  // Arrow keys walk the bar, which is what a role=tablist promises a screen
+  // reader and a keyboard user it will do.
+  tabsEl.addEventListener('keydown', (e) => {
+    const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+    if (!step) return;
+    e.preventDefault();
+    const ids = [...tabs.keys()];
+    const next = ids[(ids.indexOf(selected) + step + ids.length) % ids.length];
+    selectTarget(next);
+    tabs.get(next)?.focus();
+  });
+  tabsEl.classList.remove('hidden');
+}
+
+function selectTarget(id) {
+  if (!id) return;
+  selected = id;
+  // Remembered, because the server you were looking at a minute ago is
+  // overwhelmingly the one you want back after a reload or a restart.
+  try { localStorage.setItem(TAB_KEY, id); } catch { /* private mode */ }
+  tabs.forEach((btn, tid) => {
+    const on = tid === id;
+    btn.classList.toggle('is-on', on);
+    btn.setAttribute('aria-selected', String(on));
+    btn.tabIndex = on ? 0 : -1;
+  });
+  cards.forEach((node, cid) => node.classList.toggle('is-on', cid === id));
+}
+
+// The first card to exist wins if nothing was remembered — never no selection
+// at all, which would render an empty page.
+function ensureSelection(targets) {
+  if (selected && targets.some((t) => t.id === selected)) return;
+  let stored = null;
+  try { stored = localStorage.getItem(TAB_KEY); } catch { /* private mode */ }
+  // ?tab=<id> so a link can point at one server without opening the stripped-down
+  // pop-out window, which is a different thing and loses the tab bar.
+  const asked = params.get('tab');
+  const valid = (id) => id && targets.some((t) => t.id === id);
+  const pick = ONLY || (valid(asked) ? asked : null) || (valid(stored) ? stored : null) || targets[0]?.id;
+  selectTarget(pick);
+}
+
 if (ONLY) {
   document.body.classList.add('solo');
   document.getElementById('feedSection').classList.add('hidden');
@@ -231,6 +302,7 @@ function buildCard(target) {
     btn.addEventListener('click', () => selectChartView(node.querySelector('.chart-wrap'), btn.dataset.view));
   });
 
+  node.classList.toggle('is-on', target.id === selected);
   cardsEl.append(node);
   cards.set(target.id, node);
   loadHistory(target.id, node);
@@ -1680,6 +1752,16 @@ function render(snap, pending, updates, mods) {
     badge.textContent = snap.up ? 'healthy' : 'down';
   }
 
+  // The tab carries the same two facts as the card head, so the servers you are
+  // not looking at still report themselves.
+  const tab = tabs.get(snap.id);
+  if (tab) {
+    tab.querySelector('.dot').className = dot.className;
+    const c = tab.querySelector('.count');
+    c.textContent = badge.textContent;
+    c.classList.toggle('active', badge.classList.contains('active'));
+  }
+
   node.querySelector('.stats').innerHTML = statTiles(snap)
     .map(([k, v, cls, tile]) => `<div class="stat ${tile || ''}"><div class="k">${k}</div><div class="v ${cls}">${escapeHtml(String(v))}</div></div>`)
     .join('');
@@ -2520,9 +2602,14 @@ function renderBusy(wrap, res) {
   }).join('');
 
   // Four labels, not twenty-four: at card width the rest collide into a smear.
+  // The current hour always gets one, though -- it is the only column anyone
+  // looks up by name, and the baseline tick under it means nothing if the hour
+  // it is pointing at is unlabelled. A six-hour label immediately beside it
+  // stands down rather than colliding with it.
   axis.innerHTML = rows.map((r) => {
-    const show = r.hour % 6 === 0;
-    return `<span class="${r.hour === res.hour ? 'now' : ''}">${show ? hourLabel(r.hour) : ''}</span>`;
+    const isNow = r.hour === res.hour;
+    const show = isNow || (r.hour % 6 === 0 && Math.abs(r.hour - res.hour) > 1);
+    return `<span class="${isNow ? 'now' : ''}">${show ? hourLabel(r.hour) : ''}</span>`;
   }).join('');
 
   const v = busyVerdict(rows[res.hour], res.dow);
@@ -2813,6 +2900,8 @@ function applyStatus(status) {
   document.getElementById('hostLabel').textContent = status.host;
   document.getElementById('clock').textContent = fmtTime(status.now);
 
+  ensureSelection(ONLY ? status.targets.filter((t) => t.id === ONLY) : status.targets);
+
   for (const snap of status.targets) {
     if (ONLY && snap.id !== ONLY) continue;
     if (!cards.has(snap.id)) buildCard(snap);
@@ -2888,7 +2977,9 @@ async function init() {
     }
   } catch { /* auth state is a nicety, not a requirement */ }
 
-  for (const t of await api('/api/targets')) capabilities.set(t.id, t);
+  const targets = await api('/api/targets');
+  for (const t of targets) capabilities.set(t.id, t);
+  buildTabs(targets);
 
   await refresh();
   if (NO_STREAM) startPolling();
